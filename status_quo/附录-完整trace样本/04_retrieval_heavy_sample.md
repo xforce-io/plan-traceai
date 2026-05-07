@@ -191,16 +191,40 @@ chat deepseek-v3.2                                      20172.2ms Ok  [agent-exe
 | `by-conversation` 拉到 / 应有 | 17/37（46%） | **14/50（28%）** |
 | 演示的能力 | 跨语言串联 + 计费 + 错误根因 | + 检索证据链 + 失败可观测 + 复杂决策溯源 |
 
-两条 trace 互补 —— **03 是"骨架完整但语义为空"的对照基线**，**04 是"业务真实跑起来"的产品级证据链**。SDK#115 实现的 `kweaver agent trace --view evidence` 输出的就是本附录第三节那张 13 步表的格式。
+两条 trace 互补 —— **03 是"骨架完整但语义为空"的对照基线**，**04 是"业务真实跑起来"的产品级证据链**。
+
+[kweaver-sdk v0.7.3 / PR#116](https://github.com/kweaver-ai/kweaver-sdk/pull/116) 已 ship 的 `kweaver agent trace --view evidence` 输出的就是本附录第三节那张 13 步表的格式（SDK 团队另外多做了第 4 个 `--view reasoning` 视图，把 LLM ReAct 推理过程展开成时序，详见现状文档 §6.6.4）。
 
 ---
 
 ## 七、复现命令
 
+### 7.1 一键命令（推荐，v0.7.3+）
+
 ```bash
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 export KWEAVER_BASE_URL=https://<TRACE_AI_HOST>
 export KWEAVER_TOKEN=__NO_AUTH__
+
+# 13 步证据链（含 _score 命中分）—— 本附录第三节就是这条命令的输出
+kweaver agent trace 01KQ7129HD1XGB1XWBT9QTF58W --view evidence
+
+# 50-span 拓扑树（字符画）
+kweaver agent trace 01KQ7129HD1XGB1XWBT9QTF58W --view tree
+
+# LLM ReAct 推理痕迹（spec 外的彩蛋）
+kweaver agent trace 01KQ7129HD1XGB1XWBT9QTF58W --view reasoning
+
+# 4 视图全出
+kweaver agent trace 01KQ7129HD1XGB1XWBT9QTF58W --view all
+
+# 给程序消费的 JSON
+kweaver agent trace 01KQ7129HD1XGB1XWBT9QTF58W --json
+```
+
+### 7.2 通用调用（手写 DSL，看原始数据时用）
+
+```bash
 TID=3eb5c7aa3b3671242a9346e18166c689
 
 # 拉全 50 条 span（按 traceId）
@@ -210,7 +234,7 @@ kweaver call /api/agent-observability/v1/traces/_search -X POST -d "{
   \"sort\":[{\"startTime\":\"asc\"}]
 }"
 
-# 仅拉这次会话的 13 个 execute_tool span（看证据链）
+# 仅拉这次会话的 13 个 execute_tool span（看证据链原文）
 kweaver call /api/agent-observability/v1/traces/_search -X POST -d '{
   "size": 50,
   "query": {"bool":{"must":[
