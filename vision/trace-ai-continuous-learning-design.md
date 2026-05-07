@@ -12,6 +12,14 @@
 > **核心洞察 —— 智能体轨迹是企业最重要的数字资产之一。**
 > 企业要执行的任务（**意图**）与企业的数字孪生资产（**现状** = BKN / Vega / Decision Agent / Execution Factory 资源）之间，永远存在**连接与裂缝**；Agent 轨迹（trace）是这两者交汇时**唯一的一手记录** —— 它既记录了每一次"意图 → 现状 → 执行 → 结果"的完整事实链，也客观裁决了"哪些连接成立、哪些裂缝暴露"。把 trace 沉淀为可分析、可回放、可反驳的资产，就是把企业的提效与优化从经验依赖搬到数据驱动；这是 trace-ai 一切设计的**思想根**，也是 §3.1 四轴业务目标（可追溯 / 可解释 / 可实验 / 可迭代）的共同前提。
 
+**愿景（终态画像）**：trace-ai 的终态不是"更好的可观测平台"，而是把上述"连接与裂缝"沉淀为**可被实验、可被进化的资产层** —— 基于轨迹做并行实验与自动优化，去解决传统知识体系下结构性无解的三类问题：
+
+- **隐形知识沉淀（Tacit Knowledge Harvesting）**：企业里大量"为什么这样做"的领域经验藏在人脑、口口相传的实践、零散文档里 —— 手工 KG / 文档库永远追不上业务实际。trace 是 Agent 撞上这些知识盲点时的客观一手记录；triage + hindsight relabel 让这些隐形知识反向沉淀为显式资产（BKN 节点 / Skill 文档 / Decision Agent 提示 / 偏好对）。
+- **本体漂移（Ontology Drift）**：BKN 的 schema / 实体定义 / 关系定义会随业务演化而失真，Agent 用过期本体推理会出错；传统靠人定期 review 永远滞后且粗。trace 记录了每次实际访问的实体 / 关系 / 字段 —— 对照 BKN 现状即可自动发现漂移点、给出修正候选，让本体跟随业务呼吸。
+- **智能体自动调优（Agent Auto-tuning）**：(BKN × Decision Agent × Execution Factory 资源 × 配置) 组合空间爆炸，靠人手工调校无法扩展。trace + experiment + triage 让"哪种配置在哪类任务上更优"成为可声明、可实验、可回放、可反驳的工程命题，把"配置工程师靠直觉调 Agent"压缩为"业务专家声明 goal"。
+
+终态形态下，用户只需声明 **goal + guardrail + 可用资源池**，trace-ai 自动展开 candidate 配置组合 → 多轮并行实验 + 三轴打分 + triage → 产出**满足任务所需的 Decision Agent / BKN / Vega / Execution Factory 资源** bundle，附带 falsifiable manifest 与出处证据，交人审决定上线。本 spec 是这个终态的**第一公里** —— 先把 L0+L1+L2 工程闭环立住（详见 §1.4 范围），让飞轮可以转起来；隐形知识沉淀、本体漂移修复、自动配置生成等更前沿的产物，会在闭环跑通后逐步浮现。
+
 ### 1.1 现状
 
 **KWeaver 平台栈**：BKN 承载企业知识网络（实体 / 关系 / 事件 / 数据视图）、Vega 提供异构数据虚拟化、Decision Agent 负责任务推理与编排、Execution Factory 负责动作执行环境（Skill 是被 Execution Factory 管理的一类资源）。`trace-ai` 一期围绕 OpenTelemetry 建成了 AI 系统的可观测底座 —— OTel Collector 接入、OpenSearch 存储、`agent-observability` 提供 trace 查询接口，跑通了"埋点 — 采集 — 存储 — 查询"端到端最小路径。
@@ -47,17 +55,7 @@ trace-ai 当前**只完成了 L0 的一半**（schema 不充分），L1 / L2 几
 - **Agent 形态从单轮问答演进到多步骤自治执行**，(BKN × Decision Agent × Execution Factory 资源 × 配置) 组合空间爆炸式增长，**靠人手工调校已无法扩展** —— 必须让 trace 数据反过来驱动 Agent 系统的持续学习。
 - **行业研究已经把 4 层栈各自的方法论与立场分歧都摸清了**（详见 `research-agent-triage/notes/00_research_landscape.md` 与各论文笔记）。trace-ai 完整接入 L0+L1+L2 的工程窗口已经成熟，再不动手就是把先发优势让给社区。
 
-### 1.4 愿景（终态画像）
-
-trace-ai 的终态不是"更好的可观测平台"，而是把企业**意图与数字孪生现状之间的连接与裂缝**沉淀为可被实验、可被进化的资产层 —— 基于轨迹做并行实验与自动优化，去解决传统知识体系下结构性无解的三类问题：
-
-- **隐形知识沉淀（Tacit Knowledge Harvesting）**：企业里大量"为什么这样做"的领域经验藏在人脑、口口相传的实践、零散文档里 —— 手工 KG / 文档库永远追不上业务实际。trace 是 Agent 撞上这些知识盲点时的客观一手记录；triage + hindsight relabel 让这些隐形知识反向沉淀为显式资产（BKN 节点 / Skill 文档 / Decision Agent 提示 / 偏好对）。
-- **本体漂移（Ontology Drift）**：BKN 的 schema / 实体定义 / 关系定义会随业务演化而失真，Agent 用过期本体推理会出错；传统靠人定期 review 永远滞后且粗。trace 记录了每次实际访问的实体 / 关系 / 字段 —— 对照 BKN 现状即可自动发现漂移点、给出修正候选，让本体跟随业务呼吸。
-- **智能体自动调优（Agent Auto-tuning）**：(BKN × Decision Agent × Execution Factory 资源 × 配置) 组合空间爆炸，靠人手工调校无法扩展。trace + experiment + triage 让"哪种配置在哪类任务上更优"成为可声明、可实验、可回放、可反驳的工程命题，把"配置工程师靠直觉调 Agent"压缩为"业务专家声明 goal"。
-
-**终态用户旅程**：用户只需声明 **goal + guardrail + 可用资源池**，trace-ai 自动展开 candidate 配置组合 → 多轮并行实验 + 三轴打分 + triage → 产出**满足任务所需的 Decision Agent / BKN / Vega / Execution Factory 资源** bundle，附带 falsifiable manifest 与出处证据，交人审决定上线。本 spec 是这个终态的**第一公里** —— 先把 L0+L1+L2 工程闭环立住（详见 §1.5 范围），让飞轮可以转起来；隐形知识沉淀、本体漂移修复、自动配置生成等更前沿的产物，会在闭环跑通后逐步浮现。
-
-### 1.5 范围
+### 1.4 范围
 
 本 spec 描绘 trace-ai 在 KWeaver 数字孪生愿景下的整体形态：
 
