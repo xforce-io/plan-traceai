@@ -18,7 +18,7 @@
 - **本体漂移（Ontology Drift）**：BKN 的 schema / 实体定义 / 关系定义会随业务演化而失真，Agent 用过期本体推理会出错；传统靠人定期 review 永远滞后且粗。trace 记录了每次实际访问的实体 / 关系 / 字段 —— 对照 BKN 现状即可自动发现漂移点、给出修正候选，让本体跟随业务呼吸。
 - **智能体自动调优（Agent Auto-tuning）**：(BKN × Decision Agent × Execution Factory 资源 × 配置) 组合空间爆炸，靠人手工调校无法扩展。trace + experiment + triage 让"哪种配置在哪类任务上更优"成为可声明、可实验、可回放、可反驳的工程命题，把"配置工程师靠直觉调 Agent"压缩为"业务专家声明 goal"。
 
-终态形态下，用户只需声明 **goal + guardrail + 可用资源池**，trace-ai 自动展开 Trial 配置组合 → 多轮并行实验 + 三轴打分 + triage → 在资源池中圈定**最佳 Trial 的资源选择 + 参数快照**（沿用 §2.2 Bundle 定义），freeze 为 bundle（自带 falsifiable manifest 与出处证据），交人审决定上线。需点明：本 spec 范围内 bundle 是**对既有资源池的组合选型**（categorical search，见 §5.1 思想 5 / §3.3 N5），**不**包含新生成的 BKN 拓扑或 Decision Agent 模板 —— 后者属飞轮跑通后浮现的远期产物。本 spec 是这个终态的**第一公里** —— 先把 L0+L1+L2 工程闭环立住（详见 §1.4 范围），让飞轮可以转起来；隐形知识沉淀、本体漂移修复、自动配置生成等更前沿的产物，会在闭环跑通后逐步浮现。
+终态形态下，用户只需声明 **goal + guardrail + 可用资源池**（+ 冷启时的参考资料），trace-ai 自动展开 Trial 配置组合 → 多轮并行实验 + 三轴打分 + triage → 圈定**最佳 Trial 的资源选择 + 参数快照**（沿用 §2.2 Bundle 定义），freeze 为 bundle（自带 falsifiable manifest 与出处证据），交人审决定上线。bundle 同时覆盖**冷启**（Round 0 由 LLM 从 spec 直接生成 v0 候选 —— BKN 实体类型 / Skill 选型 / Agent 模板）和**迭代**（Round 1+ 在已注册候选间 categorical 选型，见 §5.1 思想 5）两态 —— mission.md 是 trace-ai **构建与演进 Agent 系统的唯一入口**（见 §3 G3）。本 spec 是这个终态的**第一公里** —— 先把 L0+L1+L2 工程闭环立住（详见 §1.4 范围），让飞轮可以转起来；**自动化**的隐形知识沉淀触发、本体漂移自动修复、跨实验的元学习等更前沿的产物，会在闭环跑通后逐步浮现。
 
 ### 1.1 现状
 
@@ -96,6 +96,8 @@ trace-ai 当前**只完成了 L0 的一半**（schema 不充分），L1 / L2 几
 | **L2 数据重构 / 重打标** | 把 L1 筛出的轨迹转为偏好数据 / 实验数据 |
 | **L3 模型对齐** | 私有模型 DPO / RLHF 微调（**不在 trace-ai 范围**） |
 
+> 这是按"trace → 偏好数据"的研究流水线**纵切**；§6.1 图二另给一个按运行时角色的**横切**视图（元控制 / 研判 / 执行 / 观测），两者正交，互为参照。
+
 #### 信号与轨迹
 
 | 术语 | 含义 |
@@ -113,22 +115,22 @@ trace-ai 分两大顶层能力，下设 9 个二级子模块（3 已存 / 6 待�
 
 | 子模块 | 一句话职责 |
 |---|---|
-| M1 采集 / M2 存储 / M3 查询 | L0 可观测三件套（M1 M2 已存在） |
-| M4 选 Curation | 在 trace 流筛高复盘价值子集 |
-| M5 评 Eval-Set Builder | 构造可复现 eval 集（含 / 不含 reference 两态） |
-| M6 演 Experiment Engine | 实验循环本体（Generate / Execute / Score / Triage） |
-| M7 放 Replay | 历史 trace 用新 Trial 重跑 |
-| M8 发 Publish Registry | bundle + manifest 资产沉淀，仅产出不上线 |
-| M9 验 Post-deploy Verify | 发布后 manifest 对账，新失败模式喂回 M4 |
-| MX1 Schema 治理 | SSOT + SchemaGuard（横切） |
+| M1 otelcol / M2 OpenSearch / M3 agent-observability | L0 可观测三件套（M1 M2 已存在） |
+| M4 Curation | 在 trace 流筛高复盘价值子集 |
+| M5 Eval-Set Builder | 构造可复现 eval 集（含 / 不含 reference 两态） |
+| M6 Experiment Engine | 实验循环本体（Generate / Execute / Score / Triage） |
+| M7 Replay | 历史 trace 用新 Trial 重跑 |
+| M8 Publish Registry | bundle + manifest 资产沉淀，仅产出不上线 |
+| M9 Post-deploy Verify | 发布后 manifest 对账，新失败模式喂回 M4 |
+| MX1 Schema SSOT + SchemaGuard | 跨 9 个子模块共享的契约（横切） |
 
 ### §2.2 基本模型
 
-> 实验循环的骨架：**experiment.md**（声明）→ 触发 N 个 **Round**（执行批次）→ 每个 Round 跑 K 个 **Trial**（配置实例）；Trial 之间通过 lineage 形成 **Forest**；终态产出 **Bundle**（自带 **Falsifiable Manifest**），交人审决定上线。
+> 实验循环的骨架：**mission.md**（声明）→ 触发 N 个 **Round**（执行批次）→ 每个 Round 跑 K 个 **Trial**（配置实例）；Trial 之间通过 lineage 形成 **Forest**；终态产出 **Bundle**（自带 **Falsifiable Manifest**），交人审决定上线。
 
 | 概念 | 含义 |
 |---|---|
-| **experiment.md** | 用户撰写的 markdown 声明：goal / guardrail / 资源池 / Variation Points / queries。运行它的引擎称 Experiment Engine（见 §7.M6） |
+| **mission.md** | 用户撰写的 markdown 声明：goal / guardrail / 资源池 / Variation Points / queries。运行它的引擎称 Experiment Engine（见 §7.M6） |
 | **Variation Point** | 实验声明里"可被搜索的轴"；本 spec 限定为 categorical |
 | **Trial** | 一次实验的"配置实例" —— 一组具体 variation 取值 + lineage（指向 parent Trial）。静态、不可变、可被多个 Round 包含 |
 | **Trial Forest** | Trial 的派生关系图。每个 Trial 至多 1 个 parent，整体是多根森林（不是一般 DAG） |
@@ -153,7 +155,7 @@ trace-ai 的业务目标围绕 **可追溯 / 可解释 / 可实验 / 可迭代**
 每一次系统变更（Trial 选型、bundle 发布、模块迭代）都自带 **falsifiable change manifest**（"预测会修复哪些 query / 风险哪些 query"）+ **出处证据**（哪些 trace / 哪一轮 / 哪份 triage 报告支持这个决策）。为什么从 v1 演到 v2 —— 全部以可机器判决、可人工审计、可回滚的形式沉淀在 publish registry。
 
 **G3 — 可实验（声明驱动）。**
-用户撰写一份 `experiment.md`（goal / guardrail 双轨 / 可用资源池 / 可变点 / 测试 queries），即可启动**并行多轮迭代实验**。实验配置由系统按 variation 声明自动展开为 Trial 集合，多轮调度、三轴打分、triage、终止判定全程自动；任何一轮都可在另一台机器复现。
+`mission.md`（goal / guardrail 双轨 / 资源池 / 可变点 / 测试 queries / 冷启参考资料）是 trace-ai **构建与演进 Agent 系统的唯一入口**：**冷启**走 Round 0（LLM 从 spec 直接生成 K 个 v0 候选 —— BKN 实体类型 / Skill 选型 / Agent 模板 / prompt），**迭代**走 Round 1+（在 Triage hints 下派生 Trial）。两态共用同一引擎与 bundle + manifest 资产链路；任何一轮都可在另一台机器复现。绕过 mission.md 直接去 console 拼 BKN / Skill / Agent 是反模式 —— 没有 manifest 即没有可问责的证据链。
 
 **G4 — 可迭代（trace → 配置生成飞轮）。**
 系统基于实验结果与轨迹自动做 triage 分析，产出下一轮的 Trial / Skill 选择 / BKN 拓扑 / Decision Agent 模板等**优化配置建议**；发布后的生产 trace 又自动回流 curation，形成 "trace → 分诊 → 配置生成 → 实验 → 发布 → trace" 的飞轮闭环。trace 不再只是事后排障凭证，而是数字孪生的实验台账。
@@ -192,7 +194,7 @@ trace-ai 的技术目标围绕三轴展开：**可观测 → 可分析 → 闭�
 
 **子目标**：
 
-- **T3.1 实验声明驱动**：experiment.md（含 goal / guardrail 双轨 / 资源池 / 可变点 / 测试 queries）走 git 管理；多轮迭代 → bundle 资产链路端到端可被 review，**任何一轮都可在另一台机器复现**。
+- **T3.1 实验声明驱动**：mission.md（含 goal / guardrail 双轨 / 资源池 / 可变点 / 测试 queries）走 git 管理；多轮迭代 → bundle 资产链路端到端可被 review，**任何一轮都可在另一台机器复现**。
 - **T3.2 自带 falsifiable manifest**：每个新 Trial / 新 bundle 必须给出"预测会修复哪些 query / 风险哪些 query"，下一轮机器判决并回写"预测命中率" —— 这是抗 self-deception 的核心机制（参考 AHE：fix-prediction 5× / regression-prediction 2× random）。
 - **T3.3 资产沉淀化**：实验过程（每轮的 Trial 集 / 三轴评分 / triage 报告）、选型证据（哪些 trace 支持哪个判断）、发布资产（bundle）、验证结果（manifest 对账）全部进 publish registry，可机器查询、可人工审计。
 - **T3.4 闭环重入生产**：发布后生产 trace 自动喂回 verify 子模块，对照 bundle 自带的 manifest 给出"实测命中率 / 回退建议"；这次验证本身又是新一轮 curation 的输入 —— **飞轮闭合**。
@@ -222,7 +224,7 @@ publish registry 只产出可复现的 bundle 资产，搭配 falsifiable manife
 实验循环的 Score 阶段把 `kweaver-eval` 作为"评分函数原语"调用，复用其双轨打分（deterministic + agent judge）与 severity 分级，不重建评测体系。
 
 **N5 — 不做通用 AutoML / 超参优化框架。**
-variation 限定为 categorical（"choose-one-from-set"），不支持连续超参 / 组合约束 DSL / generator 函数（理由见 §5.1 思想 5）。
+variation 在**迭代场景**限定为 categorical（"choose-one-from-set"），不支持连续超参 / 组合约束 DSL / 通用 generator 函数；冷启 Round 0 是**唯一**启用 LLM-generative variation 的窗口（详见 §5.1 思想 5）。
 
 **N6 — 不绑定单一存储产品。**
 一期主路径走 OpenSearch + ss4o，但所有跨子模块的契约都以"逻辑 schema + 查询接口"为锚，不以"OpenSearch DSL"为锚。后续可平滑切换到 ClickHouse / 自研引擎。
@@ -234,7 +236,7 @@ variation 限定为 categorical（"choose-one-from-set"），不支持连续超�
 
 | 维度 | "在路上"的指征 |
 |---|---|
-| 闭环跑通 | 一份完整的 experiment.md → 多轮迭代 → 产出 bundle + manifest → 发布后 verify 给出"预测命中率"；首条端到端走完即视为里程碑 |
+| 闭环跑通 | 一份完整的 mission.md → 多轮迭代 → 产出 bundle + manifest → 发布后 verify 给出"预测命中率"；首条端到端走完即视为里程碑 |
 | Schema 健康度 | **非 `partial_trace` 标记的** trace 中，关键字段（tool name/args/return/scope/source/latency/status）非空率 ≥ 95%；不合规即标 `partial_trace` + 触发 `schema_validation_failed` 事件（与 §9.2 "绝不丢数" 原则一致）|
 | Triage 信噪比 | curation 输出的"高复盘价值子集"在二次人工抽样验证下 informativeness 不低于行业 baseline（Signals 论文 ~82%）|
 | Trial Forest 进入决策 | 单次实验的 Triage 报告同时出现"沿派生链 delta"与"跨派生链绝对分"两类分（落实 §5.1 思想 6 / §5.2 D6 / §2.2 基本模型）；存在至少一例"沿派生链改某轴 → 连续两轮提分"的可回看因果链 |
@@ -250,7 +252,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
 
 ### §4.1 可观测能力（落实 L0）
 
-#### C1 数据接入（采集 / Ingestion）
+#### C1 数据接入（Ingestion）
 
 > **命题**：让任意 KWeaver 内 / 外的 Agent 应用都能以**零侵入或低侵入**的方式把执行轨迹送进 trace-ai。
 
@@ -275,7 +277,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 保留周期、索引前缀、分片策略全部可配置
   - 故障降级：部分索引不可用时，明细查询仍可用，聚合允许降级
 
-#### C3 数据查询（Query / agent-observability）
+#### C3 数据查询（agent-observability）
 
 > **命题**：对**所有上层能力** —— UI、排障工具、实验循环、replay、verify —— 提供唯一的 trace 查询入口。
 
@@ -288,7 +290,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 查询超时统一 504、schema 不一致返回 partial_trace 标记不丢数
   - Swagger 自动生成、对外文档与代码同步
 
-#### X1（横切）Schema 治理
+#### X1（横切）Schema SSOT + SchemaGuard
 
 > **命题**：schema 是 silent gating constraint，必须作为 SSOT 跨 9 个子能力共享。
 
@@ -302,7 +304,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
 
 ### §4.2 持续学习能力（落实 L1 + L2）
 
-#### C4 信号分诊（Curation / 选）
+#### C4 信号分诊（Curation）
 
 > **命题**：在生产 trace 流上以**低成本**筛出"高复盘价值子集" —— 失败链路、慢链路、latent failure（绕过 RO 的成功链路）、规则违反、新模式异常等。
 
@@ -316,11 +318,11 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 规则可解释、可驳回、可版本化（每条规则有 `rule_id` + `rule_version`，对应一份 yaml）
   - 不默认调 LLM；LLM-judge 留给后续 hindsight relabel 阶段
 
-#### C5 评测集构造（Eval-Set Builder / 评）
+#### C5 评测集构造（Eval-Set Builder）
 
 > **命题**：把 C4 的子集 + 用户给的 queries（含 / 不含 reference）整合成**可复现、可版本化、可对比**的 eval 集。
 
-- **输入**：用户在 experiment.md 中声明的 queries + C4 输出的子集
+- **输入**：用户在 mission.md 中声明的 queries + C4 输出的子集
 - **输出**：版本化的 eval set 文档（含 query / 可选 reference / source / weight / labels）
 - **关键功能点**：
   - 两态支持：query 带 reference（可走 deterministic 打分）/ 不带 reference（走三轴打分中的 outcome+trajectory 组合）
@@ -328,11 +330,11 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 来自 hindsight relabel：把 latent failure 的"原行为 vs 应有行为"沉淀为偏好对（AgentHER 风格），是 L3 的天然原料
   - eval set 走 git 管理、可 diff、可 review；版本化后被 experiment engine 引用
 
-#### C6 实验循环（Experiment Engine / 演）
+#### C6 实验循环（Experiment Engine）
 
-> **命题**：让一份 experiment.md 自动跑出最佳 Trial + 可信证据链。
+> **命题**：让一份 mission.md 自动跑出最佳 Trial + 可信证据链。
 
-- **输入**：experiment.md（goal / guardrail 双轨 / 资源池 / 可变点 / queries）+ C5 提供的 eval set
+- **输入**：mission.md（goal / guardrail 双轨 / 资源池 / 可变点 / queries）+ C5 提供的 eval set
 - **输出**：每轮的 Trial 集合 / 三轴评分 / triage 报告 + 终结轮的最佳 Trial（→ C8）
 - **关键功能点**：
   - 4 阶段流水线 + Coordinator FSM：Generate → Execute → Score → Triage（详见 §7）
@@ -345,7 +347,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 全程产 OTel trace 喂回 trace-ai 自己
   - Trial Forest / 派生评分 / 锚点机制 / 探索-利用分层：见 §5.1 思想 6 + 思想 7、§5.2 D6 + D7、§7.M6
 
-#### C7 轨迹重放（Replay / 放）
+#### C7 轨迹重放（Replay）
 
 > **命题**：拿一条历史 trace（生产或 eval set）用一个新 Trial 重跑，回答"如果当时是这个配置会怎样"。
 
@@ -357,7 +359,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 重放本身产 trace 喂回 trace-ai，并标 `replay_of=<原 trace_id>`
   - 是 verify 子能力的可选输入；也是排障工程师的"假设性问题"工具
 
-#### C8 发布资产（Publish Registry / 发）
+#### C8 发布资产（Publish Registry）
 
 > **命题**：把"最佳 Trial"沉淀为可复现、自带 manifest 的 bundle 资产；trace-ai 仅产出，不上线。
 
@@ -370,7 +372,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 版本化：每个 bundle 有唯一 ID + 校验和；可被 git 引用、可被 PR review
   - 不触发上线：bundle 仅作为"资产"产出，发布动作由人或独立平台承接
 
-#### C9 发布后验证（Post-deploy Verify / 验）
+#### C9 发布后验证（Post-deploy Verify）
 
 > **命题**：bundle 上线后，自动监控生产 trace，把"实测表现"对照 bundle 自带的 manifest 进行机器对账。**C9 是被动观测式对账，不是在线实验执行器** —— 不分配流量、不管理对照组、不执行回滚；产出的"回退建议"是给人/发布平台的输入，trace-ai 自己不动手。
 
@@ -390,12 +392,12 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
                                           │
                        ┌──────────────────┘
                        ▼
-                       C4 ─选─▶ C5 ─评─▶ C6 ─演─▶ C8 ─发─▶（人审 + 上线）
-                                  ▲          │              │
-                                  │          ▼              ▼
-                                  │         C7 ─放─▶（排障 / verify input）
-                                  │                            │
-                                  └────────── C9 ─验─◀─ 生产 trace
+                       C4 ──▶ C5 ──▶ C6 ──▶ C8 ──▶（人审 + 上线）
+                              ▲       │           │
+                              │       ▼           ▼
+                              │      C7 ──▶（排障 / verify input）
+                              │                   │
+                              └─────── C9 ◀─── 生产 trace
 ```
 
 闭环图最终态在 §6 给完整 mermaid。
@@ -436,11 +438,13 @@ trace-ai 自己的每一个子能力都产 OTel trace 喂回自己 —— curati
 
 **落地**：让 trace-ai 在生产中**可排障、可时间旅行、可被自己分析**；这也是为什么循环失败时根因可被追溯（而不是黑盒）。
 
-#### 思想 5 — Variation 仅 categorical 是 YAGNI 决定
+#### 思想 5 — Variation 默认 categorical，冷启 Round 0 启用 LLM-generative
 
-期望 80% 实验场景被 categorical 覆盖；保留连续超参 / DSL / generator 函数会让搜索空间不可证、决策不可审、引入额外评测成本。
+**迭代场景（Round 1+）**：Variation 限 categorical（"choose-one-from-set"）—— 期望 80% 实验场景被覆盖；保留连续超参 / DSL / generator 函数会让搜索空间不可证、决策不可审、引入额外评测成本。
 
-**落地**：experiment.md 的 variation 语法封闭（"choose-one-from-set"），后续若证伪再扩展。**一开始就开放是工程灾难。**
+**冷启场景（Round 0）**：mission.md 没有可选项可选（系统还不存在），Generator 由 LLM 直接从 `goal + 参考资料 + 资源池 + 测试 queries` 生成 K 个 v0 候选（BKN 实体类型 / Skill 选型 / Agent 模板 / prompt）。这是**唯一允许 generative variation 的窗口**；Round 0 生成完即冻结进注册表，Round 1+ 退回 categorical（在已注册候选间选型）。
+
+**落地**：mission.md 的 variation 语法在迭代场景封闭（categorical），在冷启场景由 Generator 把 spec 转成 K 个 categorical Trial（生成完即冻结）。**一开始就在迭代场景开放 generative 是工程灾难；只在冷启窗口允许是必要妥协。**
 
 #### 思想 6 — 派生关系必须进入评分逻辑
 
@@ -474,7 +478,7 @@ trace-ai 自己的每一个子能力都产 OTel trace 喂回自己 —— curati
 | **D1** | 持续学习能力放哪 | trace-ai 内做 6 个二级子模块 | 独立顶层模块（如 `agent-evolve`） | 同一份 trace 数据复用；C9 verify 闭环喂回 C4 curation 必须共底座 | trace-ai 仓库定位变重，README / PRD / CHANGELOG 全要重写 |
 | **D2** | 实验循环架构 | 分阶段流水线 + Coordinator FSM（方案 A） | Triage 中心化（方案 B）/ 全 dogfood Decision Agent（方案 C） | 每阶段契约独立、可恢复、可并行；triage 仍是有记忆的 agent，但不统揽全部 | Coordinator 需要状态机 + 持久化 |
 | **D3** | 评分维度 | 三轴合并（Outcome / Trajectory / Guardrail） | 单标量综合分 | 抗 reward hacking；guardrail 双轨清晰；trajectory 单独成轴让"过程合理性"独立可见 | 三轴权重需配置；可解释性向量化（不是单数字） |
-| **D4** | Guardrail 模型 | 双轨：safety = hard gate / quality = penalty | 单一 hard gate / 单一 penalty | safety 不可妥协（直接淘汰）；quality 是连续权衡（扣分） | experiment.md 中每条 guardrail 多一个 `kind` 字段 |
+| **D4** | Guardrail 模型 | 双轨：safety = hard gate / quality = penalty | 单一 hard gate / 单一 penalty | safety 不可妥协（直接淘汰）；quality 是连续权衡（扣分） | mission.md 中每条 guardrail 多一个 `kind` 字段 |
 | **D5** | Publish 出口 | 仅产出 bundle 资产 + manifest | 自动金丝雀 / AB 切流 | 思想 3 的工程落地；上线由人或独立平台负责，可问责 | 闭环不自动落地到生产；trace-ai 与发布平台之间有人工接缝 |
 | **D6** | Trial 派生关系 | Forest（每个 Trial 至多 1 个 parent） | 一般 DAG（多 parent / crossover / merge） | (a) 派生意图清晰 —— "这次改了哪个轴"是单一假设，不是多假设合并；(b) 因果归因可行 —— 沿单 parent 链回溯做差分归因；(c) 与 categorical variation 空间语义匹配 —— 该空间无 crossover 算子 | 若未来 variation 扩展到连续/混合空间（§3.3 N5 已排除），需重新设计 lineage 形态 |
 | **D7** | 跨 Round 评分可比性 | "锚点 Trial 重跑" —— 上轮最佳 Trial 在本轮重跑做基准 | 强约束 LLM-judge 跨轮一致化 / 多次评估取均值 | LLM-judge 跨轮稳定性弱（同一 query 同一 trace 不同时刻分数会漂）+ query 集随机性也存在；锚点机制把跨轮 delta 锚到"同一 Trial 在两轮的分差"，而不是"两轮各自的绝对分" | 每个 Round 的 K 个 slot 中至少 1 个被锚点占用，纯探索预算减少 |
@@ -489,19 +493,19 @@ trace-ai 内部分两层：**L0 可观测底座** + **L1+L2 持续学习能力**
 
 ```mermaid
 graph TB
-    USER[用户撰写 experiment.md]
-    AGENT[业务 Agent / Decision / Execution]
-    HUMAN[人审 + 发布平台]
+    USER[用户撰写 mission.md]
+    AGENT["业务 Agent / Decision / Execution"]
+    HUMAN["人审 + 发布平台"]
 
-    subgraph L1L2[L1+L2 持续学习能力]
-        EXP[Experiment Engine<br/>声明 → 跑 Round → 派生 Trial Forest]
-        SEL[Curation + Eval-Set<br/>选 + 评]
-        ASSET[Publish + Verify<br/>沉淀 Bundle + 发布后对账]
+    subgraph L1L2["L1+L2 持续学习能力"]
+        EXP["Experiment Engine 声明-跑 Round-派生 Trial Forest"]
+        SEL["Curation + Eval-Set"]
+        ASSET["Publish + Verify 沉淀 Bundle + 发布后对账"]
         REP[Replay]
     end
 
     subgraph L0[L0 可观测底座]
-        TRACE[(Trace Store<br/>采集 / 存储 / 查询<br/>schema SSOT 横切)]
+        TRACE[("Trace Store · Schema SSOT 横切")]
     end
 
     USER --> EXP
@@ -522,15 +526,125 @@ graph TB
     class EXP,SEL,ASSET,REP l12
 ```
 
-**要点**：
+**图一要点**：
 
 - **唯一一处人工闸门**：ASSET → HUMAN → AGENT（上线动作不在 trace-ai 边界内）
 - **三处自动闭环**：(i) AGENT → TRACE → SEL/EXP/ASSET 的飞轮；(ii) ASSET 上线后真实 trace 喂回 TRACE；(iii) ASSET 把新失败模式喂回 SEL
-- **模块级拓扑**（M1-M9 / X1 / 部署）见 §6.4 / §7
+
+> 图一回答 **"trace-ai 的能力边界与三处闭环"**（按 L0 / L1+L2 两大能力域）；下面**图二**回答 **"实验循环内部如何分工"**（按运行时 4 层 + 资产闭环侧链）。两图各管一头，配合"层 ↔ M-code 映射表"作为 §6.2 / §6.3 / §7 的子模块命名 SSOT。
+
+#### 图二：运行时分层架构（4 层主栈 + 资产闭环侧链）
+
+```text
+   ┌────────────────────────────────────────────────────────────────────────────┐
+   │  元控制层  Experiment                                                        │
+   │   Exp MD · Goal · Guardrail · 候选 Trial 队列 · 调度 · 血缘 · 终止判定          │
+   │                                                                            │
+   │   ┌──────────────────────────────────┐  ┌────────────────────────────────┐ │
+   │   │ Coordinator                      │  │ Termination Decider            │ │
+   │   │  FSM 驱动 + 跨 round 编排          │  │  guardrail / 收敛 / 用户 三选一  │ │
+   │   └──────────────────────────────────┘  └────────────────────────────────┘ │
+   └────────────────────────────────────────────────────────────────────────────┘
+
+   ┌────────────────────────────────────────────────────────────────────────────┐
+   │  研判层  Triage                                                              │
+   │   信号筛选 · 评测构造 · 行为诊断 · 三轴打分 · 改进方向 · 终止建议                   │
+   │                                                                            │
+   │   ┌──────────────────────┐  ┌────────────────────────┐  ┌────────────────┐ │
+   │   │ Curation             │  │ Eval-Set Builder       │  │ Generator      │ │
+   │   │  筛高复盘价值子集      │  │  评测集构造 + relabel    │  │  派生新 Trial  │ │
+   │   └──────────────────────┘  └────────────────────────┘  └────────────────┘ │
+   │   ┌────────────────────────────────┐  ┌────────────────────────────────┐   │
+   │   │ Scorer                         │  │ Triage Agent                   │   │
+   │   │  三轴打分（delta + 绝对分）       │  │  诊断 + 方向 + 跨轮记忆          │   │
+   │   └────────────────────────────────┘  └────────────────────────────────┘   │
+   └────────────────────────────────────────────────────────────────────────────┘
+
+   ┌────────────────────────────────────────────────────────────────────────────┐
+   │  执行层  Trial Run                                                            │
+   │   K Trials × M Queries 并行 · Conversation ID 隔离 · 绑定 Decision Agent ·    │
+   │   历史 trace 重放                                                             │
+   │                                                                            │
+   │   ┌──────────────────────────────┐  ┌──────────────────────────────────┐   │
+   │   │ Executor                     │  │ Replay                           │   │
+   │   │  K×M 并行调度到 DA             │  │  用新 Trial 重跑历史 trace        │   │
+   │   └──────────────────────────────┘  └──────────────────────────────────┘   │
+   └────────────────────────────────────────────────────────────────────────────┘
+
+   ┌────────────────────────────────────────────────────────────────────────────┐
+   │  观测底座层  Observability                                                     │
+   │   采集 · 归一化 · 存储 · 查询接口                                                │
+   │                                                                            │
+   │   ┌────────────────────┐  ┌──────────────────────┐  ┌────────────────────┐ │
+   │   │ otelcol            │  │ OpenSearch + index   │  │ agent-observability│ │
+   │   │  采集 + 尾采样       │  │  trace 存储 + 索引治理 │  │  标准化查询 API     │ │
+   │   └────────────────────┘  └──────────────────────┘  └────────────────────┘ │
+   │                                                                            │
+   │   ┌────────────────────────────────────────────────────────────────────┐   │
+   │   │ Schema SSOT + SchemaGuard                                           │   │
+   │   │  schema 版本化 + CronJob 抽样校验                                     │   │
+   │   └────────────────────────────────────────────────────────────────────┘   │
+   └────────────────────────────────────────────────────────────────────────────┘
+```
+
+**一轮 Round 的循环（4 层间数据流是环，不是栈）**：
+
+```text
+   ┌──▶ 元控制层 ──派发 Trial──▶ 执行层 ──上报 trace──▶ 观测底座层 ──查询──▶ 研判层 ──┐
+   │                                                                          │
+   └────────────── 研判结论 + 新 Trial 规格 + 血缘归档 ─────────────────────────────┘
+
+   循环直到：guardrail 饱和 ∨ 收敛 ∨ 用户介入（终止判定在元控制层）
+```
+
+**资产闭环侧链（出 trace-ai 边界 → 回喂）**：
+
+```text
+   研判层（终止：收敛 / guardrail 饱和）
+        │
+        ▼
+   Bundle + Manifest（必带 falsifiable manifest，否则 M8 拒收）
+        │
+        ▼
+   人审 ──▶ 上线 ──▶ 业务 Agent（线上）
+                       │
+                       ├── 真实 trace ──────────▶ 观测底座层
+                       │
+                       └── 对账失败模式 ─────────▶ 研判层（喂回，飞轮闭合）
+```
+
+**层 ↔ 子模块映射（M1–M9 / MX1 SSOT，§6.2 / §6.3 / §7 命名以此为准）**：
+
+| 层 | 一句话职责 | 对应子模块 |
+|---|---|---|
+| **元控制层 Experiment** | 实验 spec、调度、血缘、终止判定 | M6 Experiment Engine — Coordinator, Termination Decider |
+| **研判层 Triage** | 信号筛选、评测构造、诊断、打分、改进方向 | M4 Curation · M5 Eval-Set Builder · M6 Experiment Engine — Generator, Scorer, Triage Agent |
+| **执行层 Trial Run** | K×M 并行、会话隔离、绑定 Agent、Replay | M6 Experiment Engine — Executor · M7 Replay · 外部 Decision Agent |
+| **观测底座层 Observability** | 采集、归一化、存储、查询、Schema SSOT | M1 otelcol · M2 OpenSearch + 索引模板 · M3 agent-observability · MX1 Schema SSOT |
+| **资产闭环（侧链，出 trace-ai 边界）** | 收敛 → 资产化 → 上线 → 验证 → 喂回 | M8 Publish Registry · M9 Post-deploy Verify · 外部人审 / 发布平台 |
+
+> 上图中元控制层的 `Coordinator / Termination Decider`、研判层的 `Generator / Scorer / Triage Agent`、执行层的 `Executor` —— 这 6 个子件合在一起就是 **Experiment Engine** 这一个物理模块（编号 M6，跨 3 层），并不是 6 个独立模块。其余每个框是独立物理模块。详见 §7.2 M6。
+
+**与 §2.1 工程栈层级（L0/L1/L2）的关系（两套分层正交）**：
+
+> §2.1 的 **L0/L1/L2** 是按"trace → 偏好数据"的研究流水线**纵切**（回答"trace-ai 在数据精炼链上做哪段"，与 thesis 对齐）；本节的 **元控制 / 研判 / 执行 / 观测** 是按运行时角色**横切**（回答"实验循环内部如何协作"）。两套互不冲突：
+>
+> - L0 可观测 ⊂ 观测底座层
+> - L1 信号分诊 ⊂ 研判层（M4）
+> - L2 数据重构 ⊂ 研判层（M5）
+> - 元控制层 / 执行层 / 资产闭环 在 L0/L1/L2 中**没有对应** —— 它们是"实验循环的运行机制"，不是"数据加工阶段"
+
+**图二要点**：
+
+- **4 层主栈 + 侧链**：自顶向下"元控制 → 研判 → 执行 → 观测"，Schema SSOT 横切；资产闭环（M8/M9 + 人审 + 上线）作为侧链处理"出边界部分"
+- **数据流是环**：上下层不是单向调用，而是"派发 → 执行 → 观测 → 研判"的完整 round 循环（见上方循环图）
+- **唯一一处人工闸门**：人审（在资产闭环中，与图一一致）
+- **三处自动闭环**（与图一一致）：(i) Round 内 4 层闭环；(ii) 上线后 trace 回流观测层；(iii) 验证产出新失败模式回流研判层
+- **模块间依赖矩阵 + 调用关系**见 §7.4
 
 ### §6.2 核心业务流程图（端到端持续学习飞轮）
 
-> trace-ai 的"主旋律" —— 一份 experiment.md 如何走完"声明 → 迭代 → 资产 → 上线 → 验证 → 喂回"。
+> trace-ai 的"主旋律" —— 一份 mission.md 如何走完"声明 → 迭代 → 资产 → 上线 → 验证 → 喂回"。
 
 ```mermaid
 sequenceDiagram
@@ -542,13 +656,15 @@ sequenceDiagram
     participant ASSET as Publish + Verify
     participant EXT as 外部<br/>(Decision Agent / kweaver-eval / 发布平台)
 
-    USER->>EXP: 提交 experiment.md
+    USER->>EXP: 提交 mission.md
     EXP->>SEL: 构造 eval set
-    SEL->>TRACE: 按规则筛历史 trace
+    Note over SEL: 冷启：纯用 mission.md 中的 queries<br/>迭代：queries + 历史 trace 筛子集
+    SEL->>TRACE: 按规则筛历史 trace（仅迭代）
     SEL-->>EXP: 版本化 eval set
 
     loop 每一轮 Round
-        EXP->>EXP: 生成 K 个 Trial<br/>(派生 + 锚点)
+        EXP->>EXP: 生成 K 个 Trial
+        Note over EXP: Round 0 冷启：LLM 从 spec 生 v0 候选<br/>Round 1+ 迭代：Triage hints 派生 + 锚点
         EXP->>EXT: 并行 Execute (K × M queries)
         EXT-->>TRACE: 上报 trace
         EXT-->>EXP: 三轴打分结果
@@ -599,70 +715,9 @@ stateDiagram
 **要点**：
 
 - 6 个稳定态 + 1 个终态：状态持久化在 Coordinator 自己的存储（独立于 trace store），Pod 漂移可断点续跑。
-- `Aborted` 不是终态 → 状态保留，用户可在 UI 上点继续 / 改 experiment.md 重跑。
+- `Aborted` 不是终态 → 状态保留，用户可在 UI 上点继续 / 改 mission.md 重跑。
 - `Generating` 阶段不只是采样：它读 Triage Agent 上一轮的 hints，**有方向地**采样下一批 Trial。
 - `Triaging` → `Deciding` 之间是循环大脑做最重的判断：是继续？转方向？还是宣告 publish？
-
-### §6.4 部署拓扑（简）
-
-```mermaid
-graph LR
-    subgraph 业务侧_K8s
-        A1[业务 / Agent Pod<br/>OTel SDK]
-    end
-
-    subgraph observability_和_traceai_命名空间
-        Coll[otelcol-contrib<br/>Deployment x N]
-        ObsSvc[agent-observability<br/>Deployment]
-        CurSvc[curation Deployment]
-        EvalSvc[eval-set-builder Deployment]
-        ExpCoord[experiment-engine<br/>Coordinator + Workers]
-        RepSvc[replay Deployment]
-        PubSvc[publish-registry Deployment]
-        VfySvc[post-deploy-verify Deployment]
-        SchemaSvc[Schema 治理<br/>SchemaGuard CronJob<br/>+ Schema SSOT ConfigMap]
-        ExpStore[(experiment 状态<br/>持久化 mariadb / dm8)]
-    end
-
-    subgraph resource_命名空间
-        OS[(OpenSearch)]
-    end
-
-    subgraph KWeaver既有协同服务_trace-ai外部依赖
-        DASvc[Decision Agent 服务]
-        EvalCMD[kweaver-eval]
-        BKNStore[(BKN)]
-    end
-
-    A1 -->|OTLP| Coll
-    Coll --> OS
-    ObsSvc --> OS
-    CurSvc --> ObsSvc
-    EvalSvc --> ObsSvc
-    EvalSvc --> CurSvc
-    ExpCoord --> EvalSvc
-    ExpCoord --> ObsSvc
-    ExpCoord --> DASvc
-    ExpCoord --> EvalCMD
-    ExpCoord --> ExpStore
-    RepSvc --> ObsSvc
-    RepSvc --> DASvc
-    ExpCoord --> PubSvc
-    VfySvc --> ObsSvc
-    VfySvc --> PubSvc
-    VfySvc --> CurSvc
-    SchemaSvc --> OS
-    CurSvc --> BKNStore
-    VfySvc --> BKNStore
-```
-
-**要点**：
-
-- 持续学习层 6 个子模块都是独立 Deployment，互不共用 Pod。
-- `experiment-engine` 是唯一带持久化的（Coordinator 状态 + 存历史 round 元数据），其他子模块无状态。
-- `mariadb / dm8` 配合国产化适配（迁移文件已在仓库 `agent-observability/migrations/{mariadb,dm8}` 占位）。
-- OpenSearch 仍在 `resource` 命名空间，按平台既定方式访问。
-- trace-ai 自身**也是 KWeaver 平台栈的一部分**（见 §1.1）；本图右侧框只列出 trace-ai 调用的**既有协同服务**，不代表平台边界。
 
 ---
 
@@ -672,7 +727,7 @@ graph LR
 
 ### §7.1 已有模块（保留 + 扩张）
 
-#### M1 — 采集（otelcol-contribute-chart）
+#### M1 — otelcol-contribute-chart
 
 - **路径**：`trace-ai/otelcol-contribute-chart/`（不动）
 - **入口契约**：OTLP gRPC `:4317` / HTTP `:4318`
@@ -680,17 +735,17 @@ graph LR
   - tail sampling processor（错误链路 100% 保留 / 成功链路按租户 + Agent 采样）
   - 字段裁剪 + 大字段摘要（prompt / response / retrieval 正文用哈希 + 长度 + 截断版替代正文）
   - schema 校验 hook（接到 X1 SchemaGuard 的规则，对不合规字段标记 `partial_trace` 但不丢弃）
-- **依赖**：OpenSearch（M2）、X1 schema 治理
+- **依赖**：M2 OpenSearch、MX1 Schema SSOT
 
-#### M2 — 存储（OpenSearch + 索引治理）
+#### M2 — OpenSearch + 索引治理
 
 - **路径**：trace-ai 仓库不直接管 OpenSearch 实例，但管：
   - `trace-ai/migrations/{mariadb,dm8}/`：experiment 状态等元数据 RDB 迁移
   - 一份 OpenSearch 索引模板（新增 `trace-ai/storage-templates/`）
 - **内部要做的事**：索引模板（按信号类型 + 日期分索引）、keyword 字段定义（trace_id / experiment_id / trial_id / round / agent_id / tool_name 等）、保留策略（按租户配置）
-- **依赖**：X1 schema 治理
+- **依赖**：MX1 Schema SSOT
 
-#### M3 — 查询（agent-observability，扩张）
+#### M3 — agent-observability（扩张）
 
 - **路径**：`trace-ai/agent-observability/`（保留并扩张）
 - **入口契约**：HTTP `/api/agent-observability/v1/...`
@@ -700,11 +755,11 @@ graph LR
   - `GET /traces?conversation_id=&time_range=` — 加时间窗 + 分页
   - `GET /traces/diff?a=&b=` — 两条 trace 逐 span diff（C7 / C9 用）
   - 加查询配额（`max_time_range_hours` / `max_size`）+ 租户隔离
-- **依赖**：M2 存储；X1 schema
+- **依赖**：M2；MX1 Schema SSOT
 
 ### §7.2 新增模块（6 个 L1+L2 子能力）
 
-#### M4 — 选 / Curation
+#### M4 — Curation
 
 - **路径**：`trace-ai/curation/`
 - **入口契约**：
@@ -715,9 +770,9 @@ graph LR
   - 声明式不变量（在 BKN 上声明"若 X 则必读 Y / 必写 Z"）
   - Latent failure 检测（guard-code-as-oracle）
   - 默认不调 LLM；LLM 留给 hindsight relabel（M5）
-- **依赖**：M3 查询；BKN（外部，反查不变量）
+- **依赖**：M3；BKN（外部，反查不变量）
 
-#### M5 — 评 / Eval-Set Builder
+#### M5 — Eval-Set Builder
 
 - **路径**：`trace-ai/eval-set-builder/`
 - **入口契约**：
@@ -729,27 +784,27 @@ graph LR
   - 两态支持：带 reference / 不带 reference
   - Hindsight relabel：把 latent failure 的"原行为 vs 应有行为"沉淀为偏好对
   - eval set 版本化：可被 git 引用、可被 PR review
-- **依赖**：M4 curation；M3 查询；外部 LLM（仅 relabel 阶段）
+- **依赖**：M4；M3；外部 LLM（仅 relabel 阶段）
 
-#### M6 — 演 / Experiment Engine
+#### M6 — Experiment Engine
 
 - **路径**：`trace-ai/experiment-engine/`
 - **入口契约**：
-  - `POST /experiments` — 提交 experiment.md（解析 + 校验）
+  - `POST /experiments` — 提交 mission.md（解析 + 校验）
   - `POST /experiments/{id}/start` — 触发实验
   - `GET /experiments/{id}` — 查询状态 / 进度 / 历轮结果
   - `POST /experiments/{id}/abort` — 中止（保留状态）
   - `POST /experiments/{id}/resume` — 续跑
-- **内部子组件**：
-  - **Coordinator**：FSM 驱动 + 状态持久化（独立 RDB）+ 跨 round 编排；附带维护 Trial Forest 拓扑（lineage chain / 派生类型 / 树活性标记）作为内部数据结构
-  - **Generator**：读 variation 声明 + Triage hints，产出本轮 K 个 Trial（含派生新 Trial 与重跑锚点 Trial 的角色分配；具体配比由本组件子 spec 定）
-  - **Executor**：调度 (K Trial × M query) 并行到 Decision Agent
-  - **Scorer**：调用 kweaver-eval 走 deterministic + judge 双轨 + 三轴合成；输出**两类分**：相对父辈的 delta + 跨派生链的绝对分（落实 §5.1 思想 6）
-  - **Triage Agent**：诊断 + 改进方向 + 探索/利用趋势 + 跨轮记忆（独立持久化）；兼有"全局视野"和"沿父子链局部对比"两种诊断模式；承担 §5.1 思想 7 的"跨 Round / Forest 级"种群决策（砍枯枝 / 跨树 slot 分配）
-  - **Termination Decider**：guardrail 饱和 ∨ 收敛 ∨ 用户介入三选一
-- **依赖**：M5 eval-set；M3 查询；外部 Decision Agent；外部 kweaver-eval；持久 RDB（mariadb / dm8）
+- **内部子组件**（括号内标注 §6.1 图二运行时层归属）：
+  - **Coordinator** ⟨元控制层⟩：FSM 驱动 + 状态持久化（独立 RDB）+ 跨 round 编排；附带维护 Trial Forest 拓扑（lineage chain / 派生类型 / 树活性标记）作为内部数据结构
+  - **Generator** ⟨研判层⟩：读 variation 声明 + Triage hints，产出本轮 K 个 Trial（含派生新 Trial 与重跑锚点 Trial 的角色分配；具体配比由本组件子 spec 定）
+  - **Executor** ⟨执行层⟩：调度 (K Trial × M query) 并行到 Decision Agent
+  - **Scorer** ⟨研判层⟩：调用 kweaver-eval 走 deterministic + judge 双轨 + 三轴合成；输出**两类分**：相对父辈的 delta + 跨派生链的绝对分（落实 §5.1 思想 6）
+  - **Triage Agent** ⟨研判层⟩：诊断 + 改进方向 + 探索/利用趋势 + 跨轮记忆（独立持久化）；兼有"全局视野"和"沿父子链局部对比"两种诊断模式；承担 §5.1 思想 7 的"跨 Round / Forest 级"种群决策（砍枯枝 / 跨树 slot 分配）
+  - **Termination Decider** ⟨元控制层⟩：guardrail 饱和 ∨ 收敛 ∨ 用户介入三选一
+- **依赖**：M5；M3；外部 Decision Agent；外部 kweaver-eval；持久 RDB（mariadb / dm8）
 
-#### M7 — 放 / Replay
+#### M7 — Replay
 
 - **路径**：`trace-ai/replay/`
 - **入口契约**：
@@ -759,9 +814,9 @@ graph LR
   - 仅按"输入面"重放：原始 user query + 上下文 + 工具响应可被 mock（成本可控）
   - 严格 / 对比 / 探索三档（YAGNI 警示：可降级为单档，留扩展位）
   - 重放本身产 trace 喂回 M1，且标 `replay_of=<原 trace_id>`
-- **依赖**：M3 查询；外部 Decision Agent
+- **依赖**：M3；外部 Decision Agent
 
-#### M8 — 发 / Publish Registry
+#### M8 — Publish Registry
 
 - **路径**：`trace-ai/publish-registry/`
 - **入口契约**：
@@ -775,7 +830,7 @@ graph LR
   - 版本化、可被 git 引用、可被 PR review
 - **依赖**：M6 实验产出；M9 写回验证结果
 
-#### M9 — 验 / Post-deploy Verify
+#### M9 — Post-deploy Verify
 
 - **路径**：`trace-ai/post-deploy-verify/`
 - **入口契约**：
@@ -787,11 +842,11 @@ graph LR
   - 实测命中率对账：predicted_fixes 实测命中率、predicted_risks 实测出现率
   - 命中率显著低于阈值 → 给回退建议
   - 新失败模式自动喂回 M4 curation
-- **依赖**：M3 查询；M8 publish；M4 curation；BKN（不变量校验）
+- **依赖**：M3；M8；M4；BKN（不变量校验）
 
 ### §7.3 横切模块
 
-#### MX1 — Schema 治理（SSOT + SchemaGuard）
+#### MX1 — Schema SSOT + SchemaGuard
 
 - **路径**：`trace-ai/schema/`
   - `schema/v1/trace.yaml`、`schema/v1/experiment.yaml`、`schema/v1/bundle.yaml`、`schema/v1/manifest.yaml`、`schema/v1/eval-set.yaml`
@@ -810,13 +865,13 @@ graph LR
 
 | 调用方 → 被调用方 | M1 | M2 | M3 | M4 | M5 | M6 | M7 | M8 | M9 | 外部 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **M3 查询** | | ✓ 读 | self | | | | | | | |
-| **M4 选** | | | ✓ | self | | | | | | BKN |
-| **M5 评** | | | ✓ | ✓ | self | | | | | LLM (relabel) |
-| **M6 演** | | | ✓ | | ✓ | self | | ✓ | | DA / kweaver-eval / RDB |
-| **M7 放** | | | ✓ | | | | self | | | DA |
-| **M8 发** | | | | | | | | self | | |
-| **M9 验** | | | ✓ | ✓ 喂回 | | | ✓ 可选 | ✓ 读+回写 | self | BKN |
+| **M3** | | ✓ 读 | self | | | | | | | |
+| **M4** | | | ✓ | self | | | | | | BKN |
+| **M5** | | | ✓ | ✓ | self | | | | | LLM (relabel) |
+| **M6** | | | ✓ | | ✓ | self | | ✓ | | DA / kweaver-eval / RDB |
+| **M7** | | | ✓ | | | | self | | | DA |
+| **M8** | | | | | | | | self | | |
+| **M9** | | | ✓ | ✓ 喂回 | | | ✓ 可选 | ✓ 读+回写 | self | BKN |
 | **生产 Agent** | ✓ | | | | | | | | | |
 
 唯一持久状态：M2（trace store）、M6（experiment 状态）、M8（bundle registry）。其余无状态。
@@ -854,9 +909,9 @@ graph LR
 | 5 分钟内可查询率 | ≥ 95% |
 | 单租户 trace 写入 | 按租户配额；大字段（prompt/response/retrieval 正文）走摘要 + 哈希 + 裁剪 |
 | Trace 保留周期 | 由租户配置；默认 30/60/90 天三档 |
-| 实验循环 token 预算 | experiment.md 中声明；Generate / Score / Triage 三段独立计；超预算自动截停 |
+| 实验循环 token 预算 | mission.md 中声明；Generate / Score / Triage 三段独立计；超预算自动截停 |
 | 实验循环 wall-clock 预算 | 由 Coordinator FSM 内安全 kill-switch 兜底（默认 24h，不暴露给用户配置项） |
-| 单 Round 规模 | K=10 Trials × M=20 queries 默认上限；超过需在 experiment.md 显式声明 |
+| 单 Round 规模 | K=10 Trials × M=20 queries 默认上限；超过需在 mission.md 显式声明 |
 | OpenSearch 查询超时 | 默认 5s（当前 3s 偏紧需要调整）；超时统一 504 |
 
 ### §9.2 可用性与降级
@@ -924,7 +979,8 @@ graph LR
 | Candidate | Trial | 含义扩展 —— 加 `parent_trial_id` + `derivation_type` lineage 元数据 |
 | candidate_id | trial_id | trace attribute 字段名重命名 |
 | Triage（作为 C4 别称） | Curation | 词义收窄；Triage 一词专留给 Triage Agent（C6 内部循环大脑） |
-| Experiment（混指文件与引擎） | `experiment.md` / Experiment Engine | 拆双名 —— 文件用 `experiment.md`，引擎用 Experiment Engine / Coordinator |
+| Experiment（混指文件与引擎） | `mission.md`（文件） + Experiment Engine（引擎，M6） | 文件与运行时引擎拆双名；运行时一次"实验"= mission 的一次运行实例 |
+| `experiment.md`（早期 spec 命名） | `mission.md` | "experiment" 字面只覆盖迭代场景；改名为 `mission` 以同时涵盖冷启声明与迭代逼近，并避开 Coding Agent 工具的 `agent.md` 约定 |
 
 ### 仓库物件演进
 
