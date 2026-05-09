@@ -122,7 +122,7 @@ trace-ai 分两大顶层能力，下设 9 个二级子模块（3 已存 / 6 待�
 | M7 Replay | 历史 trace 用新 Trial 重跑 |
 | M8 Publish Registry | bundle + manifest 资产沉淀，仅产出不上线 |
 | M9 Post-deploy Verify | 发布后 manifest 对账，新失败模式喂回 M4 |
-| MX1 Schema SSOT + SchemaGuard | 跨 9 个子模块共享的契约（横切） |
+| MX1 Schema | 跨 9 个子模块共享的契约（横切；静态契约 + CLI 校验器） |
 
 ### §2.2 基本模型
 
@@ -204,7 +204,7 @@ trace-ai 的技术目标围绕三轴展开：**可观测 → 可分析 → 闭�
 下列工程约束不是技术目标的"主轴"，而是支撑这三轴落地的边界：放到 §9 边界考虑里详细写，§3 这里只点名。物理形态约束分两类（详见 §6.4）：
 
 - **服务面（M1 / M2 / M3）**：高可用 / 无状态横向扩展（K8s Deployment / StatefulSet）；写入 / 查询 SLA（沿用一期 PRD：trace 详情 P95 ≤ 2s、5 分钟可查询率 ≥ 95%、查询服务 SLA ≥ 99.9%）
-- **CLI 面（M4 / M5 / M6 / M7 / M8-submit）**：单 binary 多子命令；状态走 git 不依赖中央 RDB；driver 失败靠 portable folder + `trace exp resume` 续跑
+- **CLI 面（M4 / M5 / M6 / M7 / M8-submit）**：单 binary 多子命令；状态走 git 不依赖中央 RDB；driver 失败靠 portable folder + `kweaver trace exp resume` 续跑
 - 模块边界与契约稳定（每个 M-spec 独立演进；CLI 子命令语义版本化；服务面 API 走 `/api/<module>/v1/...` 版本化）
 - 国产化适配（HCE / openEuler / dm8 / MariaDB）
 - 可部署、可灰度：服务面走 Helm + feature flag；CLI 走二进制版本管理（每条命令对自己的 flag / 行为 SemVer）
@@ -239,7 +239,7 @@ variation 在**迭代场景**限定为 categorical（"choose-one-from-set"），
 | 维度 | "在路上"的指征 |
 |---|---|
 | 闭环跑通 | 一份完整的 mission.md → 多轮迭代 → 产出 bundle + manifest → 发布后 verify 给出"预测命中率"；首条端到端走完即视为里程碑 |
-| Schema 健康度 | 拆成两条独立指标：(a) **覆盖率** —— 全量 trace 中关键字段（tool name/args/return/scope/source/latency/status）非空率 ≥ 95%；(b) **SchemaGuard 漏检率** —— 未被标 `partial_trace` 但实际字段缺失的比例 ≤ 1%（即非 partial_trace 内部接近 100%）。两条联立才能避免"覆盖率达标但其实是漏检高"的伪健康。不合规即标 `partial_trace` + 触发 `schema_validation_failed` 事件（与 §9.2 "绝不丢数" 一致）|
+| Schema 健康度 | 拆成两条独立指标：(a) **覆盖率** —— 全量 trace 中关键字段（tool name/args/return/scope/source/latency/status）非空率 ≥ 95%；(b) **schema 校验漏检率** —— 未被标 `partial_trace` 但实际字段缺失的比例 ≤ 1%（即非 partial_trace 内部接近 100%）。两条联立才能避免"覆盖率达标但其实是漏检高"的伪健康。不合规即标 `partial_trace` + 触发 `schema_validation_failed` 事件（与 §9.2 "绝不丢数" 一致）|
 | Triage 信噪比 | curation 输出的"高复盘价值子集"在二次人工抽样验证下 informativeness 不低于行业 baseline（Signals 论文 ~82%）|
 | Trial Forest 进入决策 | 单次实验的 Triage 报告同时出现三类分 —— "派生 delta / 探索绝对 / 锚点 cross-round delta"（落实 §5.1 思想 6 / §5.2 D6 + D7 / §2.2 基本模型）；存在至少一例"沿派生链改某轴 → 连续两轮提分"的可回看因果链 |
 | Manifest 可信度 | publish registry 中每个 bundle 的 manifest，post-deploy verify 阶段实测命中率显著高于随机（参考 AHE：fix-prediction 5× / regression-prediction 2×）|
@@ -292,7 +292,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
   - 查询超时统一 504、schema 不一致返回 partial_trace 标记不丢数
   - Swagger 自动生成、对外文档与代码同步
 
-#### X1（横切）Schema SSOT + SchemaGuard
+#### X1（横切）Schema SSOT + 校验器
 
 > **命题**：schema 是 silent gating constraint，必须作为 SSOT 跨 9 个子能力共享。
 
@@ -300,7 +300,7 @@ trace-ai 整体提供 **9 项二级子能力**，分布在两大顶层能力（�
 - **输出**：跨子模块共享的契约文档 + 自动校验器
 - **关键功能点**：
   - 一份版本化（`schema_version`）的 trace schema 定义文件，归 trace-ai 仓库根管理
-  - 校验器（SchemaGuard）：异步抽样校验 → 标 partial_trace + 告警
+  - 校验器双轨：M1 inline 校验（标 partial_trace + 触发 schema_validation_failed event）+ `kweaver trace schema audit` CI 周期 audit（跨 span 不变量 / 漂移率 / 准入率，详见 §7.MX1）
   - 字段别名兼容（如 `session_id → agent.session.id`），兼容表也版本化
   - 必填字段清单（针对 L1/L2 准入）：tool name/args/return/scope/source/latency/status；缺失即告警
 
@@ -587,8 +587,8 @@ graph TB
    │   └────────────────────┘  └──────────────────────┘  └────────────────────┘ │
    │                                                                            │
    │   ┌────────────────────────────────────────────────────────────────────┐   │
-   │   │ Schema SSOT + SchemaGuard                                           │   │
-   │   │  schema 版本化 + CronJob 抽样校验                                     │   │
+   │   │ Schema SSOT + 校验器                                                │   │
+   │   │  schema 版本化 + M1 inline 校验 + CLI audit（CI 周期触发）            │   │
    │   └────────────────────────────────────────────────────────────────────┘   │
    └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -629,7 +629,7 @@ graph TB
 | **观测底座层 Observability** | 采集、归一化、存储、查询、Schema SSOT | M1 otelcol · M2 OpenSearch + 索引模板 · M3 agent-observability · MX1 Schema SSOT |
 | **资产闭环（侧链，出 trace-ai 边界）** | 收敛 → 资产化 → 上线 → 验证 → 喂回 | M8 Publish Registry · M9 Post-deploy Verify · 外部人审 / 发布平台 |
 
-> 上图中元控制层的 `Coordinator / Termination Decider`、研判层的 `Generator / Scorer / Triage Agent`、执行层的 `Executor` —— 这 6 个子件合在一起就是 **Experiment Engine** 这一个逻辑模块（编号 M6，跨 3 层），并不是 6 个独立模块。其余每个框是独立逻辑模块（**物理形态见 §6.4** —— L0 三件套是常驻 Service、M4/M5/M7 是 CLI、M9 是 CronJob+CLI、MX1 是 git 静态契约+CronJob）。详见 §7.2 M6。
+> 上图中元控制层的 `Coordinator / Termination Decider`、研判层的 `Generator / Scorer / Triage Agent`、执行层的 `Executor` —— 这 6 个子件合在一起就是 **Experiment Engine** 这一个逻辑模块（编号 M6，跨 3 层），并不是 6 个独立模块。其余每个框是独立逻辑模块（**物理形态见 §6.4** —— L0 三件套是常驻 Service、M4/M5/M6/M7/M8/M9 是 `kweaver trace ...` CLI 子命名空间、MX1 是 git 静态契约 + CLI 校验器；周期触发由 git 仓库自带 CI workflow 承担）。详见 §7.2 M6。
 
 **与 §2.1 工程栈层级（L0/L1/L2）的关系（两套分层正交）**：
 
@@ -720,14 +720,14 @@ stateDiagram
 
 **要点**：
 
-- 6 个稳定态 + 1 个终态：状态持久化在**实验文件夹的 `.trace-state/events.jsonl`**（详见 §6.4.3），driver 进程崩溃 / 笔记本关停均可断点续跑（`trace exp resume`）。
-- `Aborted` 不是终态 → 状态保留，用户可 `trace exp resume` 续跑、`trace exp run` 改 mission.md 重跑、或 `git revert` 回退到任意检查点。
+- 6 个稳定态 + 1 个终态：状态持久化在**实验文件夹的 `.trace-state/events.jsonl`**（详见 §6.4.3），driver 进程崩溃 / 笔记本关停均可断点续跑（`kweaver trace exp resume`）。
+- `Aborted` 不是终态 → 状态保留，用户可 `kweaver trace exp resume` 续跑、`kweaver trace exp run` 改 mission.md 重跑、或 `git revert` 回退到任意检查点。
 - `Generating` 阶段不只是采样：它读 Triage Agent 上一轮的 hints，**有方向地**采样下一批 Trial。
 - `Triaging` → `Deciding` 之间是循环大脑做最重的判断：是继续？转方向？还是宣告 publish？
 
 ### §6.4 部署形态 / 交互形态
 
-§6.1–6.3 给的是逻辑分层与时序；本节给**物理形态**——哪些是常驻 Service、哪些是 CronJob、哪些是 CLI、状态住在哪。这是 §1.4 "vision-level" 之下、各 M-spec "MVP 锁"之上的一层中等粒度承诺，**所有"零服务-above-L0"承诺与状态归属决策都集中于此**，下游 M-spec 不得越过本节自行选型。
+§6.1–6.3 给的是逻辑分层与时序；本节给**物理形态**——哪些是常驻 Service、哪些是 CLI、状态住在哪、周期触发怎么走。这是 §1.4 "vision-level" 之下、各 M-spec "MVP 锁"之上的一层中等粒度承诺，**所有"零服务-above-L0"承诺与状态归属决策都集中于此**，下游 M-spec 不得越过本节自行选型。
 
 #### §6.4.1 物理形态总表
 
@@ -736,20 +736,20 @@ stateDiagram
 | M1 otelcol | **Service** (K8s Deployment) | OTLP gRPC :4317 / HTTP :4318 |
 | M2 OpenSearch | **Service** (K8s StatefulSet 或外置) | trace 存储 + 索引模板 |
 | M3 agent-observability | **Service** (K8s Deployment) | HTTP `/api/agent-observability/v1/...`，给 UI / 排障工具 / 全部 CLI 共用查询入口 |
-| MX1 SchemaGuard | **CronJob** | 异步抽样校验；`schema/v1/*.yaml` 是 git 化静态契约，不是 service |
-| M4 Curation | **CLI** | `trace curate scan ...` |
-| M5 Eval-Set Builder | **CLI** | `trace eval-set build/relabel ...` |
-| M6 Experiment Engine | **CLI 家族** + portable folder | `trace exp run / resume / watch / abort / list` |
-| M7 Replay | **CLI** | `trace replay <trace_id> --trial v2` |
-| M8 Publish Registry | **CLI submit + git read** | `trace bundle submit`；bundle.yaml / manifest.yaml 入 git repo，M9 用 git 协议读 |
-| M9 Post-deploy Verify | **CronJob + CLI** | helm chart 提供 master CronJob，扫 publish-registry git repo 里 `deployed_at` 标过的 bundle，触发 `trace verify check <bundle-id>` |
+| MX1 Schema | **git 化静态契约 + CLI 校验器** | `schema/v1/*.yaml` 是 git 化静态契约；audit / validate 由 `kweaver trace schema` 子命令承担；周期触发由 trace-ai 仓库 `.github/workflows/schema-audit.yml` 驱动 |
+| M4 Curation | **CLI** | `kweaver trace curate scan ...` |
+| M5 Eval-Set Builder | **CLI** | `kweaver trace eval-set build/relabel ...` |
+| M6 Experiment Engine | **CLI 家族** + portable folder | `kweaver trace exp run / resume / watch / abort / list` |
+| M7 Replay | **CLI** | `kweaver trace replay <trace_id> --trial v2` |
+| M8 Publish Registry | **CLI submit + git read** | `kweaver trace bundle submit`；bundle.yaml / manifest.yaml 入 git repo，M9 用 git 协议读 |
+| M9 Post-deploy Verify | **CLI** | `kweaver trace verify check <bundle-id>` / `kweaver trace verify scan`；周期触发由 publish-registry 仓库 `.github/workflows/verify.yml` 驱动 |
 
 **净效果**：
 
-- 常驻 Service：**3 个**（全在 L0 数据面：M1 / M2 / M3）
-- CronJob：2 个（MX1 / M9）
-- CLI 子命令家族：6 个 `trace` 二级命令
-- **Above L0 零常驻服务** —— 控制面 100% 由 git + CLI 承载
+- 常驻 Service：**3 个**（全在 L0 数据面：M1 / M2 / M3，住 kweaver 平台 / trace-ai 仓库）
+- CronJob：**0**
+- CLI 子命名空间：7 个 `kweaver trace` 二级命令（住 kweaver-sdk monorepo `packages/typescript/`）
+- **Above L0 零常驻服务、零 K8s 依赖** —— 控制面 100% 由 git + CLI + git 仓库自带 CI 定时 workflow 承载
 
 #### §6.4.2 控制态 vs 遥测态：双源真相（不引入 RDB 中央索引）
 
@@ -760,7 +760,7 @@ trace-ai 把状态明确分两类，各有自己的天生家：
 | **控制态** | FSM 阶段 / Trial Forest / Round 决策 / triage 结论 / bundle / manifest / verification 报告 | 分钟级、KB 量级、需 review | **git**（实验文件夹 + publish-registry repo） |
 | **遥测态** | trace / span / 每条 trial × query 执行细节 | 秒级、GB 量级、需实时查询 | **M3 + OpenSearch**（L0 服务面） |
 
-控制态进 git 自动免费拿到：版本化 / PR review / blame / diff / 分支即"实验 fork" / audit log / 零常驻服务。遥测态本来就在 M3 实时可查——任何人 `trace exp watch` 拿 `experiment_id` 去 M3 拉就是了。**实时性需求由遥测面承接，不为控制面再拉中央索引服务**——这是 trace-ai 不引入 "Coordinator service" 与 "Bundle Registry service" 的根本理由。
+控制态进 git 自动免费拿到：版本化 / PR review / blame / diff / 分支即"实验 fork" / audit log / 零常驻服务。遥测态本来就在 M3 实时可查——任何人 `kweaver trace exp watch` 拿 `experiment_id` 去 M3 拉就是了。**实时性需求由遥测面承接，不为控制面再拉中央索引服务**——这是 trace-ai 不引入 "Coordinator service" 与 "Bundle Registry service" 的根本理由。
 
 #### §6.4.3 实验即可移植文件夹（M6 portable folder 目录契约）
 
@@ -783,16 +783,16 @@ my-experiment/                    # 可被 git push / clone / fork
 
 **driver 生命周期**：
 
-- `trace exp run` → 抢 `lock.json` → 读 `events.jsonl` 续上 FSM → 推进、async submit / poll 远端智能体层 → 每个状态迁移 append `events.jsonl` + 必要时写快照
+- `kweaver trace exp run` → 抢 `lock.json` → 读 `events.jsonl` 续上 FSM → 推进、async submit / poll 远端智能体层 → 每个状态迁移 append `events.jsonl` + 必要时写快照
 - 笔记本关停 = driver 进程结束 = state 在文件夹里冻结；远端已发出去的 trial 在远端继续跑、结果落盘
 - 任意机器恢复：`cd my-experiment && trace exp resume` 接着跑（前提是文件夹已 git pull 到位，或本来就是同一目录）
-- 跨机器接力：`git push` → 另一台机器 `git pull` + `trace exp resume`
+- 跨机器接力：`git push` → 另一台机器 `git pull` + `kweaver trace exp resume`
 
 **commit 频率约定**：
 
 - 每个 Round 末尾必 commit + push（重大节点，跨机器可见性）
 - Round 内仅本地 commit（local checkpoint，不污染远端历史）
-- bundle 终态后 `trace bundle submit` 推送进 publish-registry git repo
+- bundle 终态后 `kweaver trace bundle submit` 推送进 publish-registry git repo
 
 #### §6.4.4 远端契约：async submit + poll（目标 contract）
 
@@ -809,11 +809,13 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 
 #### §6.4.5 已知反方意见（写进设计、不装看不见）
 
-**(a) 并发 driver 风险**：A 和 B 在不同机器同时 `trace exp resume` 同一文件夹 → 双 driver 都在调远端 → race。git 不防这个。**对策**：cooperative lock 文件 `.trace-state/lock.json`（hostname + pid + 30s 心跳），driver 启动前抢锁、退出释放、心跳过期视为弃锁。这是"足够用"的工程约定，不是分布式锁的强保证；冲突发生时代价是该轮重做，不影响系统其他部分。
+**(a) 并发 driver 风险**：A 和 B 在不同机器同时 `kweaver trace exp resume` 同一文件夹 → 双 driver 都在调远端 → race。git 不防这个。**对策**：cooperative lock 文件 `.trace-state/lock.json`（hostname + pid + 30s 心跳），driver 启动前抢锁、退出释放、心跳过期视为弃锁。这是"足够用"的工程约定，不是分布式锁的强保证；冲突发生时代价是该轮重做，不影响系统其他部分。
 
-**(b) 跨团队 `trace exp list` 没了真源**：git 没有"列出全公司所有进行中实验"的查询。**对策**：MVP 不承担此职责（实验作为 artifact，发现靠组织约定 / GitHub 搜索 / 共享 repo 路径）。如未来真有 dashboard 需求，做一个**纯被动的 git crawler 索引 service**——git 仍是 source of truth，crawler 只是缓存——见 §9.5。
+**(b) 跨团队 `kweaver trace exp list` 没了真源**：git 没有"列出全公司所有进行中实验"的查询。**对策**：MVP 不承担此职责（实验作为 artifact，发现靠组织约定 / GitHub 搜索 / 共享 repo 路径）。如未来真有 dashboard 需求，做一个**纯被动的 git crawler 索引 service**——git 仍是 source of truth，crawler 只是缓存——见 §9.5。
 
 **(c) 状态新鲜度 vs commit 噪音**：driver 不可能每次 FSM 转移都立即 commit + push。**对策**：见 §6.4.3 的 commit 约定——Round 末尾必 push，Round 内仅本地 commit。新鲜度 = "最新 push 的 Round + 本地未 push 的进展"，监控时按需 git pull。
+
+**(d) CI runner 距离与凭证管理**：above-L0 周期性触发（MX1 schema audit / M9 verify scan）由 trace-ai 仓库与 publish-registry 仓库各自的 git CI 定时 workflow 承担，而非 K8s CronJob。这意味着：①CI runner 距离 M2 远，audit 必须保持抽样而非全量；②RBAC 边界从集群运维换成仓库管理员（GitHub Secrets / 等价物）；③scheduled 触发是 best-effort（实际可能延 5–30 分钟），对小时-天粒度 cadence 够用，秒级触发不够。这些是新设计的内在约束，不是回退选项。
 
 #### §6.4.6 与现有章节的串联
 
@@ -821,6 +823,15 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 - §3.3 N3 已加补丁，约定 `deployed_at` 时间戳由发布平台回写，作为 M9 触发锚点（不是控制权）。
 - §7 各模块的"路径 / 入口契约"按本节对齐；§7.4 依赖矩阵按"CLI 间不互调，全部走共享 git state + 远端服务"重画。
 - §9.1 / §9.2 边界考虑调整：wall-clock 兜底改为远端 job TTL + driver resume；可用性不再为 M4/M5/M7/M8 承诺 K8s Deployment SLA。
+
+#### §6.4.7 publish-registry URL 解析
+
+publish-registry git repo 由组织管理（§7.M8），CLI 端通过两层解析定位：
+
+1. **默认值**：`kweaver config trace.publish-registry-url <git-url>`（per-profile，复用 kweaver-sdk 既有 `kweaver config` 设施）
+2. **覆盖值**：实验文件夹 `mission.md` 的 frontmatter 可声明 `publish-registry: <git-url>`（让单个实验可推到非默认 registry）
+
+优先级：mission.md > kweaver config > 报错（无配置时 `kweaver trace bundle submit` / `kweaver trace verify scan` 拒绝执行，要求显式配置）。
 
 ---
 
@@ -837,7 +848,7 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 - **内部要做的事**：在现有 receivers / batch / exporter 链路上，扩张三件 ——
   - tail sampling processor（错误链路 100% 保留 / 成功链路按租户 + Agent 采样）
   - 字段裁剪 + 大字段摘要（prompt / response / retrieval 正文用哈希 + 长度 + 截断版替代正文）
-  - schema 校验 hook（接到 X1 SchemaGuard 的规则，对不合规字段标记 `partial_trace` 但不丢弃）
+  - schema 校验 hook（接到 MX1 schema/v1/ 的规则，对不合规字段标记 `partial_trace` 但不丢弃）
 - **依赖**：M2 OpenSearch、MX1 Schema SSOT
 
 #### M2 — OpenSearch + 索引治理
@@ -867,11 +878,11 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 #### M4 — Curation
 
 - **形态**：**CLI**（无 service；详见 §6.4.1）
-- **路径**：`trace-ai/cli/curate/`（实现）+ 规则 yaml 走 git（默认存放约定 `<repo>/curation-rules/`）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/curate.ts` + `kweaver-sdk/packages/typescript/src/trace-core/curate/`（CLI 实现）+ 规则 yaml 走 git（默认存放约定 `<repo>/curation-rules/`）
 - **入口契约**：
-  - `trace curate scan [--time-range=] [--tenant=] [--rules=<path>]` — 扫指定时间窗 / 租户范围的 trace 流，输出"高复盘价值子集"为 yaml 文件（默认 `curation-output/<ts>.yaml`）
-  - `trace curate rules list` / `trace curate rules validate <path>` — 规则发现 + 校验（规则本身是 git-tracked yaml，无需 register API）
-  - **拾取 M9 喂回**：扫描时自动并入 `publish-registry/bundles/*/curation-feed.yaml` 中由 M9 commit 的新失败模式（§6.4 飞轮闭合走 git）
+  - `kweaver trace curate scan [--time-range=] [--tenant=] [--rules=<path>] [--no-feed-pull]` — 扫指定时间窗 / 租户范围的 trace 流，输出"高复盘价值子集"为 yaml 文件（默认 `curation-output/<ts>.yaml`）
+  - `kweaver trace curate rules list` / `kweaver trace curate rules validate <path>` — 规则发现 + 校验（规则本身是 git-tracked yaml，无需 register API）
+  - **拾取 M9 喂回**：扫描时自动并入 `publish-registry/bundles/*/curation-feed.yaml` 中由 M9 commit 的新失败模式（§6.4 飞轮闭合走 git）；`--no-feed-pull` 跳过此步用于本地调试
 - **内部要做的事**：
   - 三层信号探针（交互 / 执行 / 环境）+ 状态机检测器
   - 声明式不变量（在 BKN 上声明"若 X 则必读 Y / 必写 Z"）
@@ -882,10 +893,10 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 #### M5 — Eval-Set Builder
 
 - **形态**：**CLI**（无 service；详见 §6.4.1）
-- **路径**：`trace-ai/cli/eval-set/`（实现）+ eval set yaml 走 git（约定 `<repo>/eval-sets/<name>/`）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/eval-set.ts` + `kweaver-sdk/packages/typescript/src/trace-core/eval-set/`（CLI 实现）+ eval set yaml 走 git（约定 `<repo>/eval-sets/<name>/`）
 - **入口契约**：
-  - `trace eval-set build [--queries=<path>] [--curation=<path>] --out=<dir>` — 由 (mission.md 内 queries + M4 输出的 curation 子集) 构造 eval set yaml
-  - `trace eval-set relabel <eval-set-dir>` — hindsight relabel（LLM 在此启用），把 latent failure 重写为偏好对
+  - `kweaver trace eval-set build [--queries=<path>] [--curation=<path>] --out=<dir> [--with-reference]` — 由 (mission.md 内 queries + M4 输出的 curation 子集) 构造 eval set yaml
+  - `kweaver trace eval-set relabel <eval-set-dir> [--sync]` — hindsight relabel（LLM 在此启用），把 latent failure 重写为偏好对；正式路径走 async submit + poll，`--sync` 是 dev / debug 降级
   - **版本化即 git 版本**：不需要独立 GET /eval-sets/{id}，git checkout / blame 即取
 - **内部要做的事**：
   - 从 trace 圈选 query → 自动脱敏 → 入 eval set
@@ -897,14 +908,14 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 #### M6 — Experiment Engine
 
 - **形态**：CLI 家族 + portable folder（**非常驻 service**；详见 §6.4.3）
-- **路径**：`trace-ai/cli/exp/`（实现）+ 用户侧的可移植实验文件夹（state 真源，不在仓库内）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/exp.ts` + `kweaver-sdk/packages/typescript/src/trace-core/{exp,experiment-folder}/`（CLI 实现）+ 用户侧的可移植实验文件夹（state 真源，不在仓库内）
 - **入口契约**（CLI 子命令）：
-  - `trace exp run [folder]` — 在指定文件夹（默认 cwd）抢 lock，读 mission.md 启动 / 续跑
-  - `trace exp resume [folder]` — 等价语义，强调"续跑"语义；接续 events.jsonl 上次 FSM 阶段
-  - `trace exp watch [folder]` — 实时跟读 events.jsonl + 拉 M3 遥测（拼出"当前 Round 第几个 trial 跑到什么程度"的视图）
-  - `trace exp abort [folder]` — 写终止意图到 lock.json；driver 下次 FSM 检查点检测到即优雅退出（cooperative abort）
-  - `trace exp list [path...]` — 在给定路径下扫所有实验文件夹列状态（git ls-remote 也可，不依赖中央索引）
-- **state 真源**：实验文件夹 `.trace-state/` 内的 events.jsonl + trial-forest.yaml + jobs.jsonl + rounds/round-N.yaml + lock.json（详见 §6.4.3 目录契约）
+  - `kweaver trace exp run [folder]` — 在指定文件夹（默认 cwd）抢 lock，读 mission.md 启动 / 续跑
+  - `kweaver trace exp resume [folder]` — 等价语义，强调"续跑"语义；接续 events.jsonl 上次 FSM 阶段（与 run 同一代码路径，仅提示语区分）
+  - `kweaver trace exp watch [folder]` — 实时跟读 events.jsonl + 拉 M3 遥测（拼出"当前 Round 第几个 trial 跑到什么程度"的视图）；不抢 lock、不写文件
+  - `kweaver trace exp abort [folder]` — 写独立文件 `.trace-state/abort.signal`（不污染 lock.json 心跳协议）；driver 在 FSM 每个 transition 之间 poll 此文件，检测到即优雅退出（cooperative abort）
+  - `kweaver trace exp list [path...]` — 在给定路径下扫所有实验文件夹列状态（git ls-remote 也可，不依赖中央索引）
+- **state 真源**：events.jsonl 是 append-only 真源（FSM journal）；trial-forest.yaml 与 rounds/round-N.yaml 是从 events.jsonl 派生的快照，崩坏可重建；jobs.jsonl 是远端 job_id 流水（独立辅助流，恢复 in-flight 任务用）；lock.json 是 cooperative 心跳锁；abort.signal 是 abort 协议（详见 §6.4.3 目录契约）
 - **内部子组件**（无服务边界，全部跑在 CLI 进程里；括号内标注 §6.1 图二运行时层归属）：
   - **Coordinator** ⟨元控制层⟩：FSM 驱动 + 状态以 events.jsonl append-only 持久化 + 跨 round 编排；附带维护 Trial Forest 拓扑（lineage chain / 派生类型 / 树活性标记）作为内部数据结构
   - **Generator** ⟨研判层⟩：读 variation 声明 + Triage hints，产出本轮 K 个 Trial（含派生新 Trial 与重跑锚点 Trial 的角色分配；具体配比由本组件子 spec 定）
@@ -912,30 +923,31 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
   - **Scorer** ⟨研判层⟩：调用 kweaver-eval 走 deterministic + judge 双轨 + 三轴合成；按 Trial 角色输出**三类分**：派生 Trial 的 vs-parent delta + 探索 Trial 的跨派生链绝对分 + 锚点 Trial 的 cross-round 自身 delta（落实 §5.1 思想 6 + 折衷 D7）；safety guardrail hard gate 横切三类（违反即淘汰）
   - **Triage Agent** ⟨研判层⟩：诊断 + 改进方向 + 探索/利用趋势 + 跨轮记忆（持久化在文件夹 events.jsonl + rounds/）；兼有"全局视野"和"沿父子链局部对比"两种诊断模式；承担 §5.1 思想 7 的"跨 Round / Forest 级"种群决策（砍枯枝 / 跨树 slot 分配）
   - **Termination Decider** ⟨元控制层⟩：guardrail 饱和 ∨ 收敛 ∨ 用户介入三选一
-- **依赖**：M3（拉遥测 / `trace exp watch`）；M5 提供的 eval set（git-tracked yaml，CLI 直接读）；远端 Decision Agent、kweaver-eval、Triage Agent 走 async submit + poll（§6.4.4）；本地 git（commit + push 控制态）
+  - **本地 / 远端归属澄清**：研判层 3 件（Generator / Scorer / Triage Agent）在 CLI 进程内是 thin wrapper——智能决策发生在远端智能体层（DA / kweaver-eval / Triage 远端 service），CLI 内部代码只做：调用编排、结果合成、与 FSM 的 binding；元控制层 2 件（Coordinator / Termination Decider）才是真正本地逻辑
+- **依赖**：M3（拉遥测 / `kweaver trace exp watch`）；M5 提供的 eval set（git-tracked yaml，CLI 直接读）；远端 Decision Agent、kweaver-eval、Triage Agent 走 async submit + poll（§6.4.4）；本地 git（commit + push 控制态）
 
 #### M7 — Replay
 
 - **形态**：**CLI**（无 service；详见 §6.4.1）
-- **路径**：`trace-ai/cli/replay/`（实现）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/replay.ts` + `kweaver-sdk/packages/typescript/src/trace-core/replay/`（CLI 实现）
 - **入口契约**：
-  - `trace replay <trace_id> --trial <trial-spec> [--mode=strict|compare|explore]` — 用指定 Trial 重跑历史 trace
-  - `trace replay --experiment-id=<id> --query=<q> --trial=<spec>` — 等价的另一种定位方式
-  - 输出：新 trace（自动喂回 M1，标 `replay_of=<原 trace_id>`）+ 与原 trace 的逐 span diff（写本地 yaml 或 stdout）
+  - `kweaver trace replay <trace_id> --trial <trial-spec> [--mode=strict|compare|explore]` — 用指定 Trial 重跑历史 trace
+  - `kweaver trace replay --experiment-id=<id> --query=<q> --trial=<spec>` — 等价的另一种定位方式
+  - 输出：新 trace（由远端 DA 在 replay 时正常打 OTel，CLI 在 replay 请求里带 `replay_of=<原 trace_id>` attribute，DA 必须原样标进新 trace 的 root span）+ 与原 trace 的逐 span diff（写本地 yaml 或 stdout）
 - **内部要做的事**：
   - 仅按"输入面"重放：原始 user query + 上下文 + 工具响应可被 mock（成本可控）
-  - 严格 / 对比 / 探索三档（YAGNI 警示：可降级为单档，留扩展位）
-  - 重放本身产 trace 喂回 M1，且标 `replay_of=<原 trace_id>`
-- **依赖**：M3（HTTP 拉原 trace）；远端 Decision Agent（async submit + poll）；M1（喂回新 trace）
+  - 严格 / 对比 / 探索三档（YAGNI 警示：MVP 期单档实现 `compare`，其余留 enum 但报"not yet implemented"，保留 flag 是为了未来扩展不破坏命令字面值）
+  - 新 trace 的产生路径：远端 DA 自己打 OTel 经 M1 入 M2，CLI 不直接 push OTLP；`replay_of` 是契约性 attribute，DA 必须原样标进
+- **依赖**：M3（HTTP 拉原 trace + diff 接口）；远端 Decision Agent（async submit + poll；DA 自己打 OTel 喂回 M1）
 
 #### M8 — Publish Registry
 
 - **形态**：**CLI submit + git read**（无 read service；详见 §6.4.1 / §6.4.2）
-- **路径**：`trace-ai/cli/bundle/`（submit 实现）+ 一个独立 git repo `publish-registry/`（bundle 真源，由组织管理）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/bundle.ts` + `kweaver-sdk/packages/typescript/src/trace-core/bundle/`（submit 实现）+ 一个独立 git repo `publish-registry/`（bundle 真源，由组织管理；URL 解析见 §6.4.7）
 - **入口契约**：
-  - `trace bundle submit <experiment-folder>` — 从实验 outputs/ 拉 bundle.yaml + manifest.yaml，**CLI 侧强制 manifest 校验**（缺失或不合规直接拒）+ 校验和 + 出处证据，commit 到 publish-registry repo 的 `bundles/<bundle-id>/` 目录
-  - `trace bundle show <bundle-id>` — 等价于 `git show` + 解析（便利包装）
-  - `trace bundle list [--experiment-id=]` — 等价于 `git log --grep` / 目录扫描（便利包装）
+  - `kweaver trace bundle submit <experiment-folder>` — 从实验 outputs/ 拉 bundle.yaml + manifest.yaml，**CLI 侧强制 manifest 校验**（缺失或不合规直接拒）+ 校验和 + 出处证据，commit 到 publish-registry repo 的 `bundles/<bundle-id>/` 目录；bundle-id 由 CLI 算定（`<experiment-id>-<short-sha-of-bundle.yaml>`），submit 是 idempotent
+  - `kweaver trace bundle show <bundle-id>` — 等价于 `git show` + 解析（便利包装）
+  - `kweaver trace bundle list [--experiment-id=]` — 等价于 `git log --grep` / 目录扫描（便利包装）
   - **读路径直接走 git 协议**：M9 / 人审 / 外部工具 直接 `git clone` 或用 `git ls-tree` + `git show` 读 bundle 内容，不经过任何 service
 - **publish-registry repo 目录契约**：
   ```
@@ -946,7 +958,7 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
                 ├── manifest.yaml        # falsifiable change manifest
                 ├── provenance.yaml      # 出处证据：trace_id 列表 / round / triage 报告引用
                 ├── deployed_at.yaml     # 由发布平台 / 人审在上线后回写（§3.3 N3 补丁）
-                └── verifications/       # M9 CronJob 写入的对账报告
+                └── verifications/       # M9 CLI 写入的对账报告
                       └── <verify-id>.yaml
   ```
 - **内部要做的事**：
@@ -957,44 +969,49 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 
 #### M9 — Post-deploy Verify
 
-- **形态**：**CronJob + CLI**（无常驻 service；详见 §6.4.1）
-- **路径**：`trace-ai/cli/verify/`（实现）+ `trace-ai/charts/post-deploy-verify/`（helm chart 提供 master CronJob 模板）
+- **形态**：**CLI**（无常驻 service；周期触发由 publish-registry 仓库自带 git CI 定时 workflow 承担；详见 §6.4.1）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/verify.ts` + `kweaver-sdk/packages/typescript/src/trace-core/verify/`（CLI 实现）+ `publish-registry/.github/workflows/verify.yml`（M9 spec 提供 reference impl，由 publish-registry 仓库管理员落地）
 - **入口契约**：
-  - `trace verify check <bundle-id>` — CLI 一次性触发：拉 bundle 关联生产 trace + 读 manifest + 对账 + 写 verification.yaml
-  - `trace verify scan [--registry=<git-url>]` — 扫整个 publish-registry git repo，对所有有 `deployed_at` 但 cadence 到点的 bundle 触发 check（master CronJob 调用此命令）
+  - `kweaver trace verify check <bundle-id>` — CLI 一次性触发：拉 bundle 关联生产 trace + 读 manifest + 对账 + 写 verification.yaml
+  - `kweaver trace verify scan [--registry=<git-url>]` — 扫整个 publish-registry git repo，对所有有 `deployed_at` 但 cadence 到点的 bundle 触发 check（git CI 定时 workflow 调用此命令）
 - **触发机制**：
-  - **不主动订阅 trace 流**（避免常驻 service）；改为 master CronJob 周期性扫描（默认 1h 频率），按每个 bundle 的 `deployed_at` 时间戳决定是否到达"上线后 1h / 24h / 1w / 1m"档对账时刻
-  - master CronJob 由 helm chart 部署，operator helm install 时启用；扫一次代价低（git ls-tree + 读小 yaml）
-  - 单 bundle 命中 cadence 即 fork 一次 `trace verify check <bundle-id>` 子任务
+  - **不主动订阅 trace 流**（避免常驻 service）；改为 publish-registry 仓库自带的 git CI 定时 workflow 周期扫描（默认 1h 频率），按每个 bundle 的 `deployed_at` 时间戳决定是否到达"上线后 1h / 24h / 1w / 1m"档对账时刻
+  - 该 workflow 由 publish-registry 仓库管理员部署（M9 spec 提供 reference yaml）；扫一次代价低（git ls-tree + 读小 yaml）；任何有 publish-registry 写权 + M3 读权的人都能手动 `kweaver trace verify scan`
+  - 单 bundle 命中 cadence 即触发一次 `kweaver trace verify check <bundle-id>` 子任务
 - **输出 / 反馈路径**（全走 git，无 service）：
   - `verification.yaml` commit 进 `publish-registry/bundles/<bundle-id>/verifications/<ts>.yaml`（manifest 命中率 / 偏离指标 / 回退建议）
-  - 新失败模式 commit 到约定路径 `publish-registry/bundles/<bundle-id>/curation-feed.yaml` —— 下次任意人 `trace curate scan` 时拾取（飞轮闭合走 git，不走 RPC）
+  - 新失败模式 commit 到约定路径 `publish-registry/bundles/<bundle-id>/curation-feed.yaml` —— 下次任意人 `kweaver trace curate scan` 时拾取（飞轮闭合走 git，不走 RPC）
 - **内部要做的事**：
   - 读 `publish-registry/bundles/<bundle-id>/deployed_at.yaml` 决定 cadence
   - 读 `bundle.manifest` 中"预测会修复 / 预测风险"的 query 模式
   - 经 M3 拉关联生产 trace（按 bundle_id / agent_id / 时间窗）
-  - 实测命中率对账：predicted_fixes 命中率、predicted_risks 出现率（参考 AHE 阈值）
+  - 实测命中率对账：predicted_fixes 命中率、predicted_risks 出现率（AHE 阈值由 manifest.yaml 自身声明，不硬编码全局阈值）
   - 命中率显著低于阈值 → 在 verification.yaml 给回退建议
   - 新失败模式抽取入 curation-feed.yaml
-- **依赖**：M3（拉生产 trace）；publish-registry git repo（读 bundle / 写 verification + curation-feed）；BKN（不变量校验）；helm chart 部署的 K8s CronJob 运行时
+- **依赖**：M3（拉生产 trace）；publish-registry git repo（读 bundle / 写 verification + curation-feed）；BKN（不变量校验）；git CI 定时 workflow 运行时（GitHub Actions 或等价）
 
 ### §7.3 横切模块
 
-#### MX1 — Schema SSOT + SchemaGuard
+#### MX1 — Schema SSOT + 校验器
 
-- **形态**：**git 化静态契约 + CronJob 校验器**（无 service；详见 §6.4.1）
-- **路径**：`trace-ai/schema/`（git 化静态契约）+ `trace-ai/charts/schema-guard/`（helm chart 提供 CronJob）
-  - `schema/v1/trace.yaml`、`schema/v1/experiment.yaml`、`schema/v1/bundle.yaml`、`schema/v1/manifest.yaml`、`schema/v1/eval-set.yaml`
+- **形态**：**git 化静态契约 + CLI 校验器 + 周期 audit CI workflow**（无 service、无 CronJob；详见 §6.4.1）
+- **路径**：
+  - SSOT：`trace-ai/schema/v1/`（git 化静态契约）—— `trace.yaml`、`experiment.yaml`、`bundle.yaml`、`manifest.yaml`、`eval-set.yaml`
+  - CLI 校验器：`kweaver-sdk/packages/typescript/src/commands/trace/schema.ts` + `kweaver-sdk/packages/typescript/src/trace-core/schema/`
+  - schema mirror 副本：`kweaver-sdk/packages/typescript/src/trace-core/schema/v1/*.yaml`（CLI 自带，build 时打进 dist；维护者在 schema PR 里同步推送）
+  - 同步源 SHA 锁：`kweaver-sdk/packages/typescript/schema-mirrors.lock`（多源可扩展，CI lint 校验一致性）
+  - 周期 audit workflow：`trace-ai/.github/workflows/schema-audit.yml`（每 1h 跑 `kweaver trace schema audit`，报告 commit 到 `trace-ai/schema-audit-reports/` 或开 issue）
 - **入口契约**：
-  - **schema 文件本身是 SSOT**：YAML / JSON Schema 格式、版本化、git-tracked、可被任何模块直接 import；不需要 service "提供" schema
-  - SchemaGuard 跑成 K8s CronJob，异步抽样校验 trace（默认 1h 频率，从 M2 抽样）
-  - 提供轻量 CLI：`trace schema validate <file>` 给开发者本地校验
+  - **schema 文件本身是 SSOT**：YAML / JSON Schema 格式、版本化、git-tracked；trace-ai 后端服务（M1 inline schema hook）直接同仓 import；CLI 通过 mirror 副本使用
+  - `kweaver trace schema validate <file>` — 开发者本地：单文件 ajv 校验
+  - `kweaver trace schema audit [--time-window=1h] [--sample=1000] [--out=]` — CI 周期调用：跨 span 不变量 / 漂移率 / L1/L2 准入率 抽样报告
 - **内部要做的事**：
   - 必填字段清单（针对 L1/L2 准入）
   - 字段别名兼容表（如 `session_id → agent.session.id`）
   - 兼容窗口（每个 minor version 至少保留一个 minor 的并行期）
-  - 违反字段统一标 `partial_trace` + 触发 `schema_validation_failed` event
-- **依赖**：M2（抽样校验入库 trace）；所有 above-L0 CLI 直接读 schema 静态文件
+  - 违反字段统一标 `partial_trace` + 触发 `schema_validation_failed` event（**inline 校验在 M1 otelcol 端完成**，不在 CLI；CLI 只做单文件校验 + 周期 audit 拿 inline 干不了的三件：跨 span 不变量 / 漂移率 / 准入率）
+- **schema mirror 同步机制**：MVP 阶段走人工纪律——trace-ai 维护者改 `schema/v1/` 时在同 PR 里 cp 到 kweaver-sdk mirror 路径并 bump `schema-mirrors.lock` 中的 `synced-at-sha`；kweaver-sdk CI 跑 lint 校验"lock 中的 SHA 在 trace-ai 仓库存在 + mirror 文件 hash 与该 SHA 对应文件一致"；drift 立刻 CI 红。MVP 阶段不发独立 npm 包、不用 git submodule（schema 改动频率周/月级，人工 + lock + lint 已够）；未来 drift 频繁时再升级到自动化跨仓 PR。
+- **依赖**：M3（audit 抽样走 M3 读 trace）；trace-ai 后端服务（M1）直接同仓 import；CLI 子命令通过自带 mirror 副本使用；不依赖 K8s 集群
 
 ### §7.4 模块依赖矩阵（精简）
 
@@ -1002,16 +1019,18 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 
 #### §7.4.1 服务调用矩阵（HTTP）
 
+> 说明：以下"M4 CLI / M5 CLI / ..."是 `kweaver trace <子命令>` 子命令的简称；M9 / MX1 的"周期触发"由相关 git 仓库自带的 git CI 定时 workflow 承担（vision 不再依赖 K8s CronJob，详见 §6.4.1）。
+
 | 调用方 ↓ / 被调方 → | M1 | M2 | M3 | 远端智能体层 (DA / kweaver-eval / Triage) | 外部 |
 |---|---|---|---|---|---|
 | **M3** | | ✓ 读 | self | | |
 | **M4 CLI** | | | ✓ 读 trace | | BKN |
 | **M5 CLI** | | | ✓ 读 trace | ✓ async (relabel LLM) | |
 | **M6 CLI** | | | ✓ 读 trace (`exp watch`) | ✓ async submit + poll（§6.4.4） | |
-| **M7 CLI** | ✓ 喂回新 trace | | ✓ 读原 trace | ✓ async (DA) | |
+| **M7 CLI** | | | ✓ 读原 trace + 读新 trace 做 diff | ✓ async (DA；DA 自己打 OTel 经 M1 入 M2) | |
 | **M8 CLI submit** | | | | | |
-| **M9 CronJob** | | | ✓ 读生产 trace | | BKN |
-| **MX1 CronJob** | | ✓ 抽样校验 | | | |
+| **M9 CLI**（CI workflow / 手动触发） | | | ✓ 读生产 trace | | BKN |
+| **MX1 CLI**（audit；CI workflow / 手动触发） | | | ✓ 抽样校验 | | |
 | **生产 Agent** | ✓ OTLP | | | | |
 
 #### §7.4.2 git 状态流（artifact 经 git repo 传递）
@@ -1019,12 +1038,12 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 | 写入方 → 路径 | 读取方 |
 |---|---|
 | 用户撰写 → `<exp>/mission.md` | M6 CLI |
-| M6 CLI → `<exp>/.trace-state/` | M6 CLI（自身续跑）；`trace exp watch` |
+| M6 CLI → `<exp>/.trace-state/` | M6 CLI（自身续跑）；`kweaver trace exp watch` |
 | M6 CLI → `<exp>/outputs/bundle.yaml + manifest.yaml` | M8 CLI submit |
-| M8 CLI submit → `publish-registry/bundles/<id>/{bundle,manifest,provenance}.yaml` | M9 CronJob、人审、外部发布平台 |
-| 发布平台 / 人审 → `publish-registry/bundles/<id>/deployed_at.yaml` | M9 CronJob |
-| M9 CronJob → `publish-registry/bundles/<id>/verifications/*.yaml` | 人审、下次实验作为输入证据 |
-| M9 CronJob → `publish-registry/bundles/<id>/curation-feed.yaml` | M4 CLI（飞轮闭合） |
+| M8 CLI submit → `publish-registry/bundles/<id>/{bundle,manifest,provenance}.yaml` | M9 CLI、人审、外部发布平台 |
+| 发布平台 / 人审 → `publish-registry/bundles/<id>/deployed_at.yaml` | M9 CLI |
+| M9 CLI → `publish-registry/bundles/<id>/verifications/*.yaml` | 人审、下次实验作为输入证据 |
+| M9 CLI → `publish-registry/bundles/<id>/curation-feed.yaml` | M4 CLI（飞轮闭合） |
 | M4 CLI → `<repo>/curation-output/*.yaml` | M5 CLI |
 | M5 CLI → `<repo>/eval-sets/<name>/` | M6 CLI |
 | MX1 → `trace-ai/schema/v1/*.yaml`（仓库内） | 所有模块（导入静态契约） |
@@ -1035,7 +1054,7 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 |---|---|---|
 | 遥测态（trace / span） | **M2 OpenSearch** | M1 写 / 所有人通过 M3 读 |
 | 实验控制态（FSM / Trial Forest） | **实验 git repo `.trace-state/`** | M6 CLI（lock 协作）|
-| Bundle / Manifest / Verification | **publish-registry git repo** | M8 CLI submit / M9 CronJob / 发布平台 deployed_at |
+| Bundle / Manifest / Verification | **publish-registry git repo** | M8 CLI submit / M9 CLI（CI workflow 触发）/ 发布平台 deployed_at |
 | Eval-set / Curation 规则 / Curation 产物 | **团队 / 实验 git repo** | M4 / M5 CLI |
 | Schema 契约 | **trace-ai 仓库 `schema/v1/`** | trace-ai 维护者（git PR）|
 
@@ -1091,13 +1110,13 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 | CLI 模块（M4 / M5 / M7 / M8-submit）失败 | 一次性进程，operator 重新执行即可；artifact 直接落 git，无中间态可丢 |
 | M6 driver 失败（笔记本崩 / Pod kill） | state 在实验文件夹 `.trace-state/`（git checkpoint）；任意机器 `cd <folder> && trace exp resume` 续跑；远端 in-flight trial 通过 jobs.jsonl + async poll 拉回（§6.4.4） |
 | 并发 driver（同一文件夹两机抢跑） | cooperative lock `.trace-state/lock.json`（hostname + pid + 30s 心跳）；冲突即第二个 driver 拒启、提示 takeover；非分布式锁强保证 —— 极端场景成本是该轮重做（§6.4.5 (a)）|
-| M9 CronJob 失败 | K8s 自动重试下次 cadence；verification 仅是补写，跳过一次不影响系统正确性 |
-| MX1 SchemaGuard CronJob 失败 | 同上 —— schema 校验是观测，不是闸门，跳过一次不阻塞数据流 |
+| M9 verify CI workflow 失败 | git CI 自动重试下次 cadence（默认 1h）；verification 仅是补写，跳过一次不影响系统正确性 |
+| MX1 schema audit CI workflow 失败 | 同上 —— schema 校验是观测，不是闸门，跳过一次不阻塞数据流；M1 inline 校验仍持续运行 |
 | OpenSearch 故障 | 明细查询保留可用，聚合允许降级；超时统一 `QUERY_TIMEOUT`，不静默丢数 |
 | Decision Agent 故障 | M6 Executor 走重试 + 指数退避；超过阈值标 `execution_failed` + 跳过该 Trial × query 单元 |
 | kweaver-eval 故障 | M6 Scorer 走重试；不合规结果标 `score_unavailable` + 该 cell 不入排名 |
 | BKN 故障 | M4 / M9 的不变量校验降级，但 trace 流不阻塞 |
-| publish-registry git repo 不可达 | M8 submit 重试；M9 CronJob 重试下次 cadence；不影响 L0 数据面 |
+| publish-registry git repo 不可达 | M8 submit 重试；M9 verify CI workflow 重试下次 cadence；不影响 L0 数据面 |
 | Schema 不合规 | 标 `partial_trace`，绝不丢数 |
 | 大流量突发 | OTel Collector memory limiter + batch processor + tail sampling 三道闸门 |
 
@@ -1112,6 +1131,7 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 | 跨租户隔离 | 所有查询 / 操作必须带租户 ID；trace store 索引按租户分片 |
 | 上线动作 | 不在 trace-ai 边界内（思想 3）；trace-ai 不持有上线密钥与权限 |
 | 审计日志 | 双面承接：(a) **控制态变更靠 git history** —— experiment 创建 / abort / resume / bundle 提交 / verify 结论 / curation 规则变更全是 git commit，blame + log 即审计；(b) **服务面变更靠 OpenSearch 审计索引** —— M3 查询、租户操作、跨租户访问尝试等服务面事件入 OpenSearch，权限与保留策略独立。两面都不引入额外的"审计 service" |
+| Redaction rules 归属 | redaction rules 是 trace-ai schema 之外的契约（脱敏 pattern 是企业敏感信息），由组织自建于 `<repo>/redaction-rules/`，**不进 schema/v1/**；M5 自动脱敏（前述）的规则源就是这套 |
 
 ### §9.4 演进与兼容
 
@@ -1141,11 +1161,11 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 | Bundle 上线后的"环境差异"如何处理 | 实验环境与生产环境的资源版本可能漂移；当前依赖 bundle.manifest 中的版本快照人工核对，长期需要"环境校验"机制 |
 | Trial 派生默认形态 | 默认 `parent=null` 多（冷启动多 + 偶尔 fork）还是默认显式派生（每代都有 parent）。两者各有适用场景；具体策略由 M6 子 spec 定，可能随实验类型自适应 |
 | Round 内角色配比 | K 个 slot 中"派生 Trial / 锚点 Trial / wild card 探索 Trial"的具体配比与切换机制由 M6 子 spec 定；vision 层只承诺"必须有锚点"（折衷 D7） |
-| 跨团队 `trace exp list` 真源 | git 单源真相不天然支持"列出全公司所有进行中实验"。MVP 接受此限（实验作为 artifact，发现靠组织约定 / GitHub 搜索 / 共享 repo 路径）；v2 真有 dashboard 需求时做**纯被动的 git crawler 索引 service**（git 仍是 source of truth，crawler 只是缓存；§6.4.5 (b)）|
+| 跨团队 `kweaver trace exp list` 真源 | git 单源真相不天然支持"列出全公司所有进行中实验"。MVP 接受此限（实验作为 artifact，发现靠组织约定 / GitHub 搜索 / 共享 repo 路径）；v2 真有 dashboard 需求时做**纯被动的 git crawler 索引 service**（git 仍是 source of truth，crawler 只是缓存；§6.4.5 (b)）|
 | Bundle 二进制大文件 | 当前 bundle 为纯文本 yaml；未来若携带 prompt 模板大文件 / retrieval 索引等二进制，publish-registry repo 启用 git LFS（§7.M8） |
 | 并发 driver lock 健壮性 | `.trace-state/lock.json` 协作锁基于心跳超时回收 —— 极端场景（机器假死、时钟漂移、网络分区）下可能误回收，造成"双 driver 短暂并发"。代价是该轮重做、不影响系统全局正确性。是否值得引入分布式锁服务，待 v2 评估（§6.4.5 (a)）|
 | 远端 job TTL 与 driver 离线时长的实际匹配 | 设计要求 TTL ≥ 72h，但具体值由 DA / kweaver-eval / Triage Agent 各自子 spec 锁定；trace-ai 没有仲裁权，只能在文档里写"建议值"。如果某下游 TTL 偏短，operator 需自约束 driver 不离线超过该 TTL —— 这条约束的工程化形式（CLI 启动时自动检测下游 TTL？）暂未定 |
-| `deployed_at` 写入主体的可靠性 | §3.3 N3 补丁约定发布平台 / 人审在上线后 commit `deployed_at.yaml`。如果发布方忘记写，M9 CronJob 不会触发对账 —— 没有 self-healing 机制。是否需要"上线前 trace-ai 给 publish-registry 加 pre-deploy hook 提醒"，留待与发布平台对接时定 |
+| `deployed_at` 写入主体的可靠性 | §3.3 N3 补丁约定发布平台 / 人审在上线后 commit `deployed_at.yaml`。如果发布方忘记写，M9 verify CI workflow 不会触发对账 —— 没有 self-healing 机制。是否需要"上线前 trace-ai 给 publish-registry 加 pre-deploy hook 提醒"，留待与发布平台对接时定 |
 
 ---
 
@@ -1160,6 +1180,7 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 | Triage（作为 C4 别称） | Curation | 词义收窄；Triage 一词专留给 Triage Agent（C6 内部循环大脑） |
 | Experiment（混指文件与引擎） | `mission.md`（文件） + Experiment Engine（引擎，M6） | 文件与运行时引擎拆双名；运行时一次"实验"= mission 的一次运行实例 |
 | `experiment.md`（早期 spec 命名） | `mission.md` | "experiment" 字面只覆盖迭代场景；改名为 `mission` 以同时涵盖冷启声明与迭代逼近，并避开 Coding Agent 工具的 `agent.md` 约定 |
+| `trace ...`（早期讨论的独立 binary 字面） | `kweaver trace ...`（kweaver-sdk 子命名空间） | trace-ai 是 kweaver 平台的一部分；CLI 不另起二进制，作为 `kweaver` 命令的 7 个子命名空间提供。注意与 `kweaver agent trace <conv_id>`（v0.7.4 已上线，agent 资源的 trace **动作**，4 视图查询）字面相近但语义不同：本 spec 的 `kweaver trace …` 是顶层**资源**命名空间 |
 
 ### 仓库物件演进
 
@@ -1169,13 +1190,15 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 | `trace-ai/otelcol-contribute-chart/` | 保留 + 扩张为 M1，加 tail sampling / 大字段裁剪 / schema hook |
 | `trace-ai/agent-observability/migrations/{mariadb,dm8}/` | M3 自身需要的 RDB 迁移仍保留；不再承接 M6 / M8 状态（控制态已移到 git，见 §6.4.2） |
 | `trace-ai/agent-observability/docs/{prd,design}/` | 与本 spec 并行：一期 PRD/Design 仍是 L0 主路径；本 spec 是更上层的整体 vision |
-| README / CHANGELOG / VERSION | 升级为"持续学习中枢"叙事；明确"3 服务 + 2 CronJob + 6 CLI"的物理形态承诺 |
-| 新增：`trace-ai/schema/` | MX1 — Schema SSOT 静态契约（git 化，非 service）|
-| 新增：`trace-ai/cli/` | **all-in-one 单 binary**，含 `exp / curate / eval-set / replay / bundle / verify / schema` 七组子命令；M4 / M5 / M6 / M7 / M8-submit / M9-CLI / MX1-CLI 共享同一进程入口 |
-| 新增：`trace-ai/charts/` | helm chart 集合：`schema-guard/`（MX1 CronJob）、`post-deploy-verify/`（M9 master CronJob）、`agent-observability/`（M3 Deployment）等 |
+| README / CHANGELOG / VERSION | 升级为"持续学习中枢"叙事；明确"3 服务 + 0 CronJob + 7 个 `kweaver trace` CLI 子命名空间"的物理形态承诺 |
+| 新增：`trace-ai/schema/v1/*.yaml` | MX1 — Schema SSOT 静态契约（git 化，非 service）|
+| 新增：`trace-ai/.github/workflows/schema-audit.yml` | MX1 周期 audit 触发（每 1h 跑 `kweaver trace schema audit`，替代 K8s CronJob 形态） |
 | 新增：`trace-ai/storage-templates/` | M2 索引模板 |
-| **不再新增**：`trace-ai/{curation,eval-set-builder,experiment-engine,replay,publish-registry,post-deploy-verify}/` 各自独立 service 目录 | 形态变更后这些都退成 CLI 子命令 + 文件夹/git 共享 artifact，无独立 service 入口；统一在 `trace-ai/cli/` 下分子模块组织代码 |
-| 用户侧（不在 trace-ai 仓库内） | 实验文件夹（git）由 operator 各自管理；publish-registry git repo 由组织管理；trace-ai 仅提供 CLI 与目录契约 |
+| **不新增** `trace-ai/cli/` | M4–M9 + MX1 的 CLI 实现住 kweaver-sdk monorepo `packages/typescript/src/commands/trace/` + `src/trace-core/`；trace-ai 仓库不直接持有 above-L0 CLI 代码（除 schema mirror 同步靠维护者人工纪律） |
+| **不新增** `trace-ai/charts/{schema-guard,post-deploy-verify}/` | CronJob 形态在本 spec 中砍掉：MX1 audit 触发由 trace-ai 仓库自带 CI workflow 承担；M9 verify 触发由 publish-registry 仓库自带 CI workflow 承担 |
+| **不再新增**：`trace-ai/{curation,eval-set-builder,experiment-engine,replay,publish-registry,post-deploy-verify}/` 各自独立 service 目录 | 形态变更后这些都退成 CLI 子命令 + 文件夹/git 共享 artifact，无独立 service 入口；统一在 kweaver-sdk monorepo 下分子模块组织代码（详见 `vision/trace-cli-detailed-design.md`） |
+| 新增：kweaver-sdk monorepo `packages/typescript/src/{commands/trace,trace-core,api/trace,ui/trace}/` | trace-ai above-L0 全部 CLI 实现住 kweaver-sdk；详细模块布局见 `vision/trace-cli-detailed-design.md` |
+| 用户侧（不在 trace-ai 仓库内） | 实验文件夹（git）由 operator 各自管理；publish-registry git repo 由组织管理（含自带 `.github/workflows/verify.yml`）；trace-ai 仅提供 schema 静态契约与 CI workflow 模板 |
 
 ## 附录 B — 与既有 spec 的关系
 
