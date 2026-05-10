@@ -110,11 +110,14 @@ B1 是 CLI 侧唯一 trace 读入口，但它背后的 M3 能力在落地期会�
 |---|---|---|---|---|
 | `getTrace(traceId)` | `GET /traces/{trace_id}` | M7 / 排障类输出 | **必须** | 不绕过；返回 `TRACE_DETAIL_API_REQUIRED`，提示先升级 M3 |
 | `searchTraces(query)` | `GET /traces?...` 或受控 POST 查询 | M4 / M5 / M9 / MX1 | **必须** | 不暴露 OpenSearch DSL；只允许 B1 内部使用 M3 受控查询契约 |
+| `searchTracesStream(query, page)` | `GET /traces?...&page_token=&page_size=` 或受控 POST 查询 | M4 / M9 大集合扫描 | **必须** | 不一次性拉全量；缺分页时返回 `TRACE_PAGINATION_API_REQUIRED` |
 | `listExperimentTraces(experimentId, filters)` | `GET /traces?experiment_id=...` | M6 watch / M7 间接定位 | **必须** | 降级为 `searchTraces` 的结构化过滤，不允许命令层拼 DSL |
 | `diffTraces(a, b)` | `GET /traces/diff?a=&b=` | M7 | post-MVP 可降级 | MVP 可在 B1 内部拉两条 trace 做 naive diff，并输出 `diff_engine=local-naive` |
 | `sampleTraces(window, sample)` | `GET /traces?time_window=&sample=` | MX1 audit | **必须** | 报 `TRACE_SAMPLE_API_REQUIRED`；audit 不做全量扫描 |
 
 **M3 错误码要求**：B1 需要区分 `SCHEMA_VALIDATION_FAILED` / `QUERY_TOO_LARGE` / `RATE_LIMITED` / `STORAGE_UNAVAILABLE` / `AUTH_FORBIDDEN`。如果 M3 仍返回泛化 5xx，B1 保留原始 HTTP status + response body 摘要，CLI 输出里标 `unclassified_m3_error=true`，避免误判成远端 job 或 CLI bug。
+
+**流式读取契约**：`searchTracesStream` 是 B1 暴露给 M4 / M9 的唯一大集合入口，返回 `AsyncIterable<TraceBatch>`，每个 batch 带 `{items, next_page_token?, response_meta}`。CLI 默认 `page_size=500`，可由命令内核按内存压力下调；命令层只消费 async iterator，不直接感知 M3 分页字段。M3 必须保证同一查询在短时间窗口内的分页稳定性；若无法保证，B1 输出 `pagination_consistency=best_effort`，并要求调用方在报告里标注抽样/扫描口径。
 
 ### 2.1.2 B2 RemoteJobClient 契约
 
@@ -143,7 +146,7 @@ poll(job_id) -> {
 2. 远端 job 结果 TTL 建议 ≥ 72h；`expired` 表示远端结果已不可取，M6 将该 cell 标为 `job_expired` 并按策略重做或跳过。
 3. `failed.retryable=true` 走指数退避；超过阈值后写入 events.jsonl，不在内存里静默丢弃。
 4. `cancelled` 只表示远端已停止；`exp abort` 的 MVP 行为是本地优雅退出，不强依赖远端 cancel 成功。
-5. `--sync` 只允许 dev/debug 与小集合 relabel；正式 `exp run` 路径必须落 `job_submitted` / `job_completed` 事件，不能把 sync 结果绕过 journal。
+5. `--sync` 只允许 dev/debug 与小集合 relabel；正式 `exp run` 路径必须落 `jobs.jsonl` 的 job transport 记录与 `events.jsonl` 的业务推进事件，不能把 sync 结果绕过 journal。
 
 ### 2.1.3 trace 输出脱敏策略
 
@@ -186,12 +189,25 @@ sources:
 
 ### 2.3 publish-registry URL 解析
 
-vision §7.M8 把 publish-registry repo "由组织管理" 留白，本设计钉两层解析（M8 / M9 共用）：
+vision §7.M8 把 publish-registry repo "由组织管理" 留白，本设计钉统一解析（M4 / M8 / M9 共用）：
 
-1. **默认值**：`kweaver config trace.publish-registry-url <git-url>`（per-profile，复用既有 `kweaver config` 设施）
-2. **覆盖值**：实验文件夹 `mission.md` 的 frontmatter 可声明 `publish-registry: <git-url>`（让一个实验可以推到非默认 registry）
+1. **命令覆盖值**：`--registry=<git-url>`（适用于没有 experiment-folder 上下文的命令，如 `curate scan` / `bundle show` / `bundle list` / `verify check` / `verify scan`）
+2. **实验覆盖值**：实验文件夹 `mission.md` 的 frontmatter 可声明 `publish-registry: <git-url>`（适用于 `bundle submit <experiment-folder>` 这类有实验上下文的命令）
+3. **默认值**：`kweaver config trace.publish-registry-url <git-url>`（per-profile，复用既有 `kweaver config` 设施）
 
-优先级：mission.md > kweaver config > 报错（无配置时 `bundle submit` / `verify scan` 拒绝执行，要求显式配置）。
+优先级：`--registry` > mission.md > kweaver config > 报错。无配置时，所有需要读取或写入 publish-registry 的命令都拒绝执行；`curate scan --no-feed-pull` 是唯一例外，因为它显式跳过 registry feed。
+
+### 2.4 用户配置心智
+
+CLI 实现会读写多类文件，但用户只需要按三类配置理解：
+
+| 用户心智 | 实际载体 | CLI 行为 |
+|---|---|---|
+| **环境配置：我连哪里** | `kweaver config` / env | `auth` / `config` 统一读取；trace 子命令不另建配置系统 |
+| **任务配置：我要优化什么** | `mission.md` + 可选 `eval-sets/` | M6 `exp run/resume` 的主入口；M8 `bundle submit` 读取 registry override |
+| **规则配置：我怎么筛 trace / 怎么验收** | `curation-policy.yaml` / `curation-rules/` / `manifest.yaml` | M4 读取筛选策略；M8/M9 读取 manifest 做发布和对账 |
+
+`.trace-state/*`、watermark、`outputs/`、`verification.yaml` 都是运行态或生成物；CLI 可以展示和校验，但用户默认不手写。`eval-sets/` 例外：既可以由用户预置，也可以由 M5 生成。
 
 ## §3 模块详设
 
@@ -200,7 +216,7 @@ vision §7.M8 把 publish-registry repo "由组织管理" 留白，本设计钉�
 **命令树**（vision §7.M4）：
 
 ```
-kweaver trace curate scan         [--time-range=] [--tenant=] [--rules=<path>] [--out=<dir>] [--no-feed-pull]
+kweaver trace curate scan         [--policy=<path>] [--time-range=] [--tenant=] [--rules=<path>] [--out=<dir>] [--registry=<git-url>] [--update-watermark] [--no-feed-pull]
 kweaver trace curate rules list   [--rules-dir=<path>]
 kweaver trace curate rules validate <rule.yaml>
 ```
@@ -210,10 +226,13 @@ kweaver trace curate rules validate <rule.yaml>
 ```
 src/commands/trace/curate.ts             # 参数解析 + dispatch（含 rules 子资源）
 src/trace-core/curate/
+  ├── planner.ts             # policy + CLI flags → CurationPlan
+  ├── policy.ts              # policy yaml loader + watermark key 计算
   ├── signal-probe.ts        # 三层信号探针（interaction / execution / environment）
   ├── invariant.ts           # 声明式不变量评估器（在 BKN 上 query "若 X 则必读 Y / 必写 Z"）
   ├── latent-failure.ts      # guard-code-as-oracle 检测（默认不调 LLM）
   ├── rules.ts               # rules yaml loader + ajv 校验
+  ├── watermark.ts           # 周期 scan 的增量游标读写
   ├── feed-pickup.ts         # 从 publish-registry 拾取 curation-feed.yaml（飞轮闭合）
   └── output.ts              # yaml 序列化（curation-output/<ts>.yaml）
 ```
@@ -227,9 +246,49 @@ src/trace-core/curate/
 
 **关键设计点**：
 
-1. `scan` 是数据流命令——大 trace 集合 streaming 处理，不落整集到内存。`signal-probe` / `invariant` / `latent-failure` 三件以 pipeline 形式串成 transform stream，单条 trace 进、判定结果出。
-2. `rules` 子资源符合 cli_conventions §2 "顶层 + 子资源 + 动作"——规则文件本身 git-tracked（约定 `<repo>/curation-rules/`），CLI 不管 register API。
-3. **飞轮闭合的唯一闭合点**：`scan` 起手 git pull publish-registry → 把所有 `bundles/*/curation-feed.yaml` merge 进当前规则集 → 再扫。`--no-feed-pull` 跳过此步（用于本地调试）。命令结束打印 `feed synced from <SHA>`。
+1. `scan` 是数据流命令——大 trace 集合通过 B1 `searchTracesStream` 分页 streaming 处理，不落整集到内存。`signal-probe` / `invariant` / `latent-failure` 三件以 pipeline 形式串成 transform stream，单条 trace 进、判定结果出。
+2. M4 只有局部 **CurationPlanner**，不新增全局 TriageController。planner 把 `--policy`、CLI flags、watermark、registry feed 合成一次性的 `CurationPlan`，然后交给 pipeline 执行。
+3. `rules` 子资源符合 cli_conventions §2 "顶层 + 子资源 + 动作"——规则文件本身 git-tracked（约定 `<repo>/curation-rules/`），CLI 不管 register API。
+4. **飞轮闭合的唯一闭合点**：`scan` 起手 git pull publish-registry → 把所有 `bundles/*/curation-feed.yaml` merge 进当前规则集 → 再扫。`--no-feed-pull` 跳过此步（用于本地调试）。命令结束打印 `feed synced from <SHA>`。
+5. watermark 只用于周期 scan，不用于一次性排障。显式 `--time-range` 默认不读写 watermark；只有 `--policy` + `--update-watermark` 同时出现时，成功输出后才推进 watermark。
+
+**CurationPolicy 最小契约**：
+
+```yaml
+policy_id: prod-agent-daily
+scope:
+  tenant: acme
+  agent_id: agent_123
+  time_window: 24h
+rulesets:
+  - curation-rules/
+registry_feed: true
+watermark:
+  enabled: true
+  safety_lag: 10m
+```
+
+`CurationPlan` 是运行时派生对象，不需要用户手写。watermark key = `policy_id + scope_hash`，value = `{trace_end_time, trace_id}`；只在 output 写入成功且 schema 校验通过后推进到 `upper_bound - safety_lag`。失败不推进，下一次允许重复扫描；输出侧按 `trace_id + rule_id` 去重。
+
+**核心流程与逻辑（以 `curate scan` 为例）**：
+
+1. **环境准备与规则加载**：
+   - `planner.ts` 读取 `--policy` 与 CLI flags，生成本次 `CurationPlan`。
+   - 从默认路径 `<repo>/curation-rules/`、policy 声明的 rulesets、用户指定的 `--rules` 路径加载 YAML 规则。
+   - 除非指定 `--no-feed-pull`，否则调用 B4 (GitStateDriver) 从 publish-registry 仓库拉取最新的 `curation-feed.yaml`，提取失败模式并转换为动态规则，合并到规则集中。
+   - 若启用 `--update-watermark`，根据 policy watermark 与 safety lag 计算本次扫描的上下界。
+2. **数据流式获取**：
+   - 调用 B1 (ObservabilityClient)，传入时间窗和租户参数，获取 Trace 数据的异步分页流（`AsyncIterable<TraceBatch>`）。
+3. **管道式过滤（Core Pipeline）**：
+   - 建立一个 Transform Stream 管道，每条 Trace 依次流经：
+     - `signal-probe`：解析 Span 属性，匹配交互/执行层异常规则。
+     - `invariant`：若规则涉及 BKN 不变量，调用 BKN API 验证该 Trace 是否满足“应读未读”等约束。
+     - `latent-failure`：通过确定性规则反查隐性失败。
+   - 任何一个环节触发规则，即为该 Trace 打上 `rule_id` 和原因标签。
+   - **短路机制**：一旦某条 Trace 触发了任意一条规则，立即流向输出缓冲区，不再继续做耗时的后续反查。
+4. **结果输出**：
+   - 命中的 Trace 及其元数据被收集，通过 `output.ts` 序列化为 YAML 格式。
+   - 写入到指定的输出目录（默认为 `curation-output/`），文件名包含时间戳。
 
 ### 3.2 M5 Eval-Set Builder — `kweaver trace eval-set`
 
@@ -237,7 +296,7 @@ src/trace-core/curate/
 
 ```
 kweaver trace eval-set build   [--queries=<path>] [--curation=<path>] --out=<dir> [--with-reference]
-kweaver trace eval-set relabel <eval-set-dir> [--sync]
+kweaver trace eval-set relabel <eval-set-dir> [--sync] [--force]
 ```
 
 **代码模块布局**：
@@ -245,7 +304,8 @@ kweaver trace eval-set relabel <eval-set-dir> [--sync]
 ```
 src/commands/trace/eval-set.ts            # 参数解析 + dispatch
 src/trace-core/eval-set/
-  ├── query-picker.ts        # 从 mission.md 的 queries 段 + M4 curation yaml 圈选
+  ├── loader.ts              # EvalSetRef[] → EvalCase[]，支持 index + shard
+  ├── query-picker.ts        # 从 mission.md fallback queries + M4 curation yaml 圈选
   ├── redactor.ts            # 自动脱敏（PII / 业务密文 patterns；规则 yaml-driven）
   ├── relabel.ts             # hindsight relabel via async LLM（用 B2 RemoteJobClient）
   └── output.ts              # eval-set yaml 多文件目录写入
@@ -260,13 +320,128 @@ src/trace-core/eval-set/
 
 **关键设计点**：
 
-1. `build` 是无状态的纯函数——输入 (queries, curation 子集) → 输出 yaml 集合。两态（带 reference / 不带）由 `--with-reference` flag 切。
-2. `relabel` 必须 async（vision §6.4.4 钉死方向）；输出**沿用同一个 eval-set 目录原地改写**——relabel 的 audit 痕迹靠 git history 本身承载，不复制到新目录。
-3. **redaction rules 不属于 schema/v1/ 范畴**——是企业敏感信息 pattern 库，由组织自建于 `<repo>/redaction-rules/`；vision §9.3 加注此约定。
+1. eval-set 是一等输入，不只是 M5 产物。用户已有“请求 + 标准答案”可直接放入 `<repo>/eval-sets/<name>/`，由 `mission.md` 引用；M5 生成的数据也写成同一格式。
+2. `build` 是无状态的纯函数——输入 (fallback queries, curation 子集) → 输出 yaml 集合。两态（带 reference / 不带）由 `--with-reference` flag 切。
+3. `relabel` 必须 async（vision §6.4.4 钉死方向）；输出**沿用同一个 eval-set 目录原地改写**——relabel 的 audit 痕迹靠 git history 本身承载，不复制到新目录。
+4. **redaction rules 不属于 schema/v1/ 范畴**——是企业敏感信息 pattern 库，由组织自建于 `<repo>/redaction-rules/`；vision §9.3 加注此约定。
+5. **原地改写必须有 git 安全前置**：默认要求 `<eval-set-dir>` 位于 git repo 内，且将被改写的 eval-set 文件没有未提交改动；否则拒绝并提示用户先 commit / stash。`--force` 可跳过 dirty 检查，但输出必须标 `audit_risk=dirty_worktree`。
+
+**用户预置 eval-set 目录契约**：
+
+```
+eval-sets/
+  customer-support-v1/
+    index.yaml
+    refund.yaml
+    shipping.yaml
+```
+
+`mission.md` frontmatter 引用：
+
+```yaml
+eval_sets:
+  - path: eval-sets/customer-support-v1/
+    role: seed
+  - path: eval-sets/regression-v2/
+    role: regression
+```
+
+`index.yaml`：
+
+```yaml
+schema_version: trace-eval-set-index/v1
+eval_set_id: customer-support-v1
+shards:
+  - path: refund.yaml
+  - path: shipping.yaml
+```
+
+shard 文件：
+
+```yaml
+schema_version: trace-eval-set/v1
+cases:
+  - query_id: refund_001
+    input:
+      user_message: "如何申请退款？"
+    reference:
+      answer: "请在订单详情页点击申请退款。"
+    assertions:
+      - type: contains
+        value: "订单详情页"
+    tags: ["refund"]
+```
+
+约束：`query_id` 在整个 eval set 内唯一；shard path 必须是目录内相对路径，禁止 `../` 越界；`role` MVP 枚举为 `seed | regression | holdout`。目录必须有 `index.yaml`；不做隐式读取 `*.yaml`，避免误读临时文件。
+
+**核心流程与逻辑（以 `eval-set build` 和 `relabel` 为例）**：
+
+**`eval-set build` 流程**：
+1. **源数据圈选**：
+   - `query-picker.ts` 聚合输入的 `--queries`（mission fallback queries）和 `--curation`（来自 M4 的输出）。
+   - 如果指定了 `--with-reference`，会尝试从历史 Trace 中提取“成功的标准输出”作为 Ground Truth（Reference）。
+2. **敏感信息脱敏**：
+   - 遍历圈选出的 Query 和上下文，调用 `redactor.ts`。
+   - 根据 `<repo>/redaction-rules/` 中的规则，对 PII（个人隐私）和业务密文进行脱敏（替换为 Hash 或脱敏占位符）。
+3. **写入与校验**：
+   - 调用 `output.ts` 将脱敏后的数据写入指定的输出目录（`<repo>/eval-sets/<name>/`）。
+   - 调用 B5 (SchemaRegistry) 校验生成的 YAML 是否符合 Eval-Set 的标准 Schema。
+
+**`eval-set relabel` 流程**：
+1. **加载与提交**：
+   - 读取指定目录下的 Eval-Set 文件。
+   - 执行 git preflight：确认目录在 git repo 内、目标文件 clean；`--force` 时只警告不阻断。
+   - 调用 B2 (RemoteJobClient) 将需要打标的失败轨迹（如 latent failure）打包，异步提交给远端 LLM（或通过 `--sync` 同步处理）。
+2. **结果轮询与就地改写**：
+   - 若为异步，CLI 周期性轮询（Poll）Job 状态。
+   - 任务成功后，拉回“原行为 vs 应有行为”的偏好对（Preference Pairs）。
+   - **核心逻辑**：不创建新目录，直接**原地改写（In-place Rewrite）**原 Eval-Set 文件。审计和版本追踪完全依赖 Git History。
 
 ### 3.3 M6 Experiment Engine — `kweaver trace exp`
 
 M6 是 7 个模块里**唯一真正复杂**的——带 FSM、长生命周期、跨进程重启、跨机器接力、async 远端编排。
+
+**实验目录用户视图**：
+
+```
+my-experiment/
+  ├── mission.md              # 必填：任务配置，用户主要编辑
+  ├── curation-policy.yaml    # 可选：规则配置，生产 trace 周期筛选时使用
+  ├── curation-rules/         # 可选：本实验规则；否则走组织默认 / registry feed
+  ├── eval-sets/              # 用户预置或 M5 生成；可 review
+  ├── outputs/                # 生成物：bundle.yaml / manifest.yaml
+  └── .trace-state/           # 运行态：events/jobs/lock/rounds，用户不手写
+```
+
+`exp run` 的冷启输入规则：优先加载 `mission.md` 中 `eval_sets` 引用的 `seed` eval set；如果没有任何 eval set，则使用 mission fallback `queries` 生成最小 eval set。Round 1+ 可以同时使用 `seed`、`regression` 与 M4/M5 追加的新 cases；`holdout` 只用于最终验证，不参与生成方向。
+
+**`exp run` preflight 卡点**：
+
+`exp run` / `resume` 在抢到 lock 后、进入 active FSM state 前，必须执行 preflight；失败时不 submit 远端 job，不生成 Trial。
+
+1. 解析 `mission.md` frontmatter 与 fallback queries。
+2. 解析 `eval_sets[]` 引用，加载 `index.yaml` 与所有 shard。
+3. 调用 B5 SchemaRegistry 校验 `eval-set-index` / `eval-set`。
+4. 检查 `query_id` 在所有参与本次实验的 eval set 内全局唯一。
+5. 检查 shard path 不越界、role 枚举合法、必填字段存在。
+6. 检查 provider capability（如 synthesizer provider / kweaver-core 依赖）。
+
+典型错误码：
+
+```text
+EVAL_SET_SCHEMA_INVALID
+EVAL_SET_DUPLICATE_QUERY_ID
+EVAL_SET_SHARD_PATH_INVALID
+EVAL_SET_ROLE_INVALID
+MISSION_EVAL_SET_NOT_FOUND
+```
+
+用户也可以提前显式校验：
+
+```bash
+kweaver trace schema validate eval-sets/customer-support-v1/index.yaml --kind=eval-set-index
+kweaver trace schema validate eval-sets/customer-support-v1/refund.yaml --kind=eval-set
+```
 
 #### 3.3.1 命令树
 
@@ -287,7 +462,8 @@ src/commands/trace/exp.ts                       # 参数解析 + dispatch（5 �
 
 src/trace-core/experiment-folder/
   ├── paths.ts                # canonical 路径解析
-  ├── mission-md.ts           # mission.md 解析（YAML frontmatter + body queries 段）
+  ├── mission-md.ts           # mission.md 解析（YAML frontmatter + body fallback queries 段）
+  ├── preflight.ts            # mission / eval-set / provider capability 启动前校验
   ├── events-jsonl.ts         # append-only 写 + replay 读（FSM 真源）
   ├── trial-forest-yaml.ts    # 派生关系拓扑 yaml（快照式覆写）
   ├── jobs-jsonl.ts           # 远端 job_id 流水（append-only）
@@ -321,7 +497,7 @@ Initializing → Generating → Executing → Scoring → Triaging → Deciding
               Aborted（任意 active state 可转入；非终态，可 resume）
 ```
 
-**真源**：`.trace-state/events.jsonl` 是 FSM 的 **append-only journal**——每次状态迁移、每个 checkpoint、每次 abort 检测都 append 一行。其余文件（`trial-forest.yaml` / `rounds/round-N.yaml`）都是**从 events.jsonl 派生的快照**，崩坏可重建。
+**真源分层**：`.trace-state/events.jsonl` 是 FSM 的 **append-only journal**——每次状态迁移、每个 checkpoint、每次 abort 检测都 append 一行。`.trace-state/jobs.jsonl` 是远端 job 的 **append-only job journal**——专门兜住 submit / poll 的 crash point。`trial-forest.yaml` / `rounds/round-N.yaml` 是从 journal 派生的快照，崩坏可重建；`lock.json` / `abort.signal` 是运行期控制文件，不作为业务真源。
 
 **events.jsonl v1 最小事件契约**：
 
@@ -345,12 +521,12 @@ Initializing → Generating → Executing → Scoring → Triaging → Deciding
 | `experiment_initialized` | 首次 run 解析 mission.md 后 | `mission_hash` | 建立 experiment_id / mission 绑定 |
 | `state_transition` | FSM 状态变化 | `from` / `to` / `reason` | fold 出当前 FSM state |
 | `trial_generated` | Generator 返回 Trial 后 | `trial_id` / `parent_trial_id` / `variation` | 重建 trial-forest |
-| `job_submitted` | B2 submit 成功后 | `job_id` / `idempotency_key` / `stage` / `trial_id` / `query_id` | 恢复 pending_jobs |
-| `job_completed` | B2 poll 到终态后 | `job_id` / `status` / `result_ref?` / `error?` | 从 pending_jobs 移除并推进 cell 状态 |
+| `trial_execution_completed` | Executor 收到 trial × query 结果后 | `trial_id` / `query_id` / `trace_id?` / `status` / `result_ref?` / `error?` | 推进 execution cell 状态 |
 | `score_recorded` | Scorer 得到分数后 | `trial_id` / `query_id` / `score_ref` / `hard_gate` | 重建 round 评分输入 |
 | `round_completed` | Triaging→Deciding 完成后 | `round` / `verdict` / `round_ref` | 标记 round 快照可用 |
 | `bundle_ready` | Publishing 输出 bundle 后 | `bundle_id` / `bundle_hash` / `manifest_hash` | 供 M8 provenance 抽取 |
-| `abort_requested` | abort.signal 被检测到 | `requested_at` / `requested_by` | fold 到 Aborted |
+| `abort_requested` | abort.signal 被检测到 | `requested_at` / `requested_by` | 触发后续 `state_transition(to=Aborted)` |
+| `abort_cleared` | resume 删除 abort.signal 后 | `cleared_at` / `cleared_by` | 审计用，不单独改变 FSM state |
 | `lock_stolen` | 过期 lock 被接管 | `previous_actor` / `heartbeat_age_sec` | 审计用，不改变业务状态 |
 | `synthesizer_capability_missing` | Generating 前置检查失败 | `provider` / `missing_capability` / `required_version?` | fail-fast，等待 operator 安装 / 升级后 resume |
 
@@ -361,19 +537,33 @@ Initializing → Generating → Executing → Scoring → Triaging → Deciding
 3. replay 遇到坏行：默认 fail-fast，提示 `kweaver trace exp doctor`（post-MVP）或人工修复；`watch/list` 可跳过坏行并标红。
 4. `trial-forest.yaml` / `round-N.yaml` 的 `source_event_id` 必须指向生成它们的最新事件，便于检测快照落后。
 
+**jobs.jsonl v1 最小事件契约**：
+
+`jobs.jsonl` 只记录远端 job transport 生命周期，避免把 B2 submit 成功但本地未落盘的断点变成不可恢复状态。它不表达 FSM 状态，也不替代 `events.jsonl` 里的业务事件。每行同样是独立 JSON object，公共字段为 `{schema_version, job_event_id, experiment_id, round, ts, actor, payload}`。
+
+| job_event_type | 何时写 | payload 最小字段 | resume 语义 |
+|---|---|---|---|
+| `job_submit_intent` | 调 B2 submit **之前** | `idempotency_key` / `target` / `stage` / `trial_id` / `query_id?` | 若无后续 `job_submitted`，resume 用同一 idempotency key 重新 submit |
+| `job_submitted` | B2 submit 返回后 | `idempotency_key` / `job_id` / `target` / `stage` / `trial_id` / `query_id?` | 建立 pending job |
+| `job_polled` | poll 到非终态进度时 | `job_id` / `status` / `progress?` | 供 watch/list 展示，不推进 FSM |
+| `job_completed` | poll 到终态后 | `job_id` / `status` / `result_ref?` / `error?` | 从 pending job 移除；随后按 stage append 对应 events.jsonl 业务事件 |
+
+写入顺序固定为：`jobs.jsonl job_submit_intent` → B2 `submit(idempotencyKey)` → `jobs.jsonl job_submitted`。如果任意一步崩溃，resume 先 fold `events.jsonl` 得到业务状态，再 fold `jobs.jsonl` 补齐 pending jobs；遇到 intent-only 记录时，用相同 idempotency key 重新 submit，远端必须返回原 job 或等价 job。`events.jsonl` 仍是 FSM 真源，`jobs.jsonl` 只补远端 job 可恢复性。
+
 **Replay 协议**（resume 的实现）：
 
 1. 抢 lock
-2. 读 events.jsonl 到内存，按事件类型 fold 出当前状态（state / round_n / pending_jobs[]）
-3. 对每个 `pending_jobs[i]`：用 B2 RemoteJobClient.poll(job_id) 看远端状态——已完成 → 直接 fold 进 trial-forest 推进 FSM；in-flight → 加回 polling 队列继续等
-4. 进 Coordinator 主循环
+2. 读 events.jsonl 到内存，按事件类型 fold 出当前状态（state / round_n / 已完成业务事件）
+3. 读 jobs.jsonl 到内存，按 idempotency key fold 出 pending jobs；对 intent-only 记录按同一 idempotency key 重提 B2 submit
+4. 对每个 `pending_jobs[i]`：用 B2 RemoteJobClient.poll(job_id) 看远端状态——已完成 → append `jobs.jsonl job_completed`，再按 stage append 对应 `events.jsonl` 业务事件（如 `trial_execution_completed` / `score_recorded` / `round_completed`）；in-flight → 加回 polling 队列继续等
+5. 进 Coordinator 主循环
 
-第 3 步是 vision §6.4.4 "driver 离线时已发出去的 trial 在远端继续跑"的具体落地。
+第 3 / 4 步是 vision §6.4.4 "driver 离线时已发出去的 trial 在远端继续跑"的具体落地。
 
 **写时序**（Coordinator 主循环每个 tick）：
 
 ```
-检查 abort.signal → 检查 pending_jobs poll → FSM transition → events.jsonl append
+检查 abort.signal → 检查 pending_jobs poll → FSM transition → events/jobs journal append
                     ↓
               必要时同步快照（trial-forest.yaml / rounds/round-N.yaml）
                     ↓
@@ -444,6 +634,44 @@ trials:
 
 `predicted_fixes` / `predicted_risks` 是 manifest 对账的前置字段；缺失时该 Trial 可用于探索，但不能进入 M8 publish bundle。
 
+#### 3.3.4.2 Triage Agent 交互协议
+
+研判层 3 件中，Triage Agent 的“智能”虽在远端，但 CLI 需负责拼装请求 Payload 并解析返回结果，将其持久化在 `rounds/round-N.yaml` 中，作为下一轮 `Generating` 的输入（Triage hints）。
+
+**标准请求 Payload 结构**：
+CLI 在 `Scoring` 阶段结束后，收集本轮数据，通过 B2 异步提交给远端 Triage Agent：
+
+```yaml
+experiment_id: "exp-123"
+current_round: 2
+cross_round_memory_ref: "mem_token_xxxx" # 跨轮记忆引用（来自上一轮的 new_memory_token）
+trials:
+  - trial_id: "trial-v1"
+    parent_trial_id: "trial-v0"
+    variation: { prompt_template: "v1" }
+    scores:
+      outcome: 0.8
+      trajectory: 0.9
+      guardrail: 1.0
+    evidence_trace_ids: ["trace-1", "trace-2"] # 支持打分的证据 trace
+```
+
+**标准返回与持久化结构（`rounds/round-N.yaml`）**：
+CLI 轮询到任务成功后，解析结果并覆写/生成对应的轮次快照文件：
+
+```yaml
+round: 2
+status: completed
+triage_conclusion:
+  diagnoses:
+    - "发现 Tool X 的调用参数在 Trial B 中经常出错，导致 trajectory 分数下降"
+  hints: # 核心：给下一轮的 Generator 提供方向
+    - "尝试收紧 Tool X 的参数范围"
+    - "可以尝试开新树探索分支 Y"
+  verdict: continue # 策略：continue 还是 publish
+  new_memory_token: "mem_token_yyyy" # 传递给下一轮的记忆 Token
+```
+
 #### 3.3.5 lock / abort / resume / watch 协议
 
 **lock.json 协议**（vision §6.4.5(a) cooperative lock，非分布式锁）：
@@ -467,8 +695,8 @@ trials:
 **abort 协议**：
 
 - `exp abort` 不抢 lock，**直接写文件** `.trace-state/abort.signal`（内容：`{requested_at, requested_by}`）
-- Coordinator 在 FSM 每个 transition 之间 **poll abort.signal**：检测到 → events.jsonl append `Aborted` + 释放 lock + 退出
-- vision §6.3 的 Aborted 不是终态——下次 `exp run` / `exp resume` 删除 abort.signal 后从最近稳定状态继续
+- Coordinator 在 FSM 每个 transition 之间 **poll abort.signal**：检测到 → events.jsonl append `abort_requested` → append `state_transition(to=Aborted, reason=abort_requested)` → 释放 lock + 退出
+- vision §6.3 的 Aborted 不是终态——下次 `exp run` / `exp resume` 删除 abort.signal 后 append `abort_cleared`，再从最近稳定业务 checkpoint 继续
 
 **resume 与 run 的关系**：
 
@@ -477,13 +705,13 @@ trials:
 
 **watch 边界**：
 
-- **不抢 lock、不写任何文件**——只读 events.jsonl（fs.watch 或 100ms polling fallback for cross-platform）+ B1 拉对应 round 的 trace 拼当前进度
+- **不抢 lock、不写任何文件**——只读 events.jsonl + jobs.jsonl（fs.watch 或 100ms polling fallback for cross-platform）+ B1 拉对应 round 的 trace 拼当前进度
 - 多人同时 watch 互不干扰
 - watch 的 UI 用 ink，三栏：FSM 状态时间轴 / 当前 round 的 K×M 矩阵进度 / 最近 5 行 events
 
 **list 边界**：
 
-- 不抢 lock。扫 `path...` 下含 `.trace-state/` 的子目录 → 对每个读最后 N 行 events.jsonl + lock.json → 输出表格（experiment / state / round / driver-host / heartbeat-age）
+- 不抢 lock。扫 `path...` 下含 `.trace-state/` 的子目录 → 对每个读最后 N 行 events.jsonl / jobs.jsonl + lock.json → 输出表格（experiment / state / round / pending-jobs / driver-host / heartbeat-age）
 
 #### 3.3.6 commit / push 节奏
 
@@ -501,7 +729,7 @@ push 失败（网络断 / 权限拒）不阻断 FSM——commit 已落地，下�
 #### 3.3.7 关键 trade-offs
 
 1. **`run` / `resume` 同一代码路径**——避免双套 FSM 启动逻辑漂移；用户语义靠提示语区分。
-2. **events.jsonl 是真源，trial-forest.yaml / round-N.yaml 是派生快照**——崩坏可从 events.jsonl 重建。事件文件持续追加，单实验持续若干月可能涨到几十 MB；可接受，未来涨到 GB 级再加 segment 切分。
+2. **events.jsonl 是 FSM 真源，jobs.jsonl 是远端 job journal，trial-forest.yaml / round-N.yaml 是派生快照**——崩坏可从 journal 重建。事件文件持续追加，单实验持续若干月可能涨到几十 MB；可接受，未来涨到 GB 级再加 segment 切分。
 3. **B2 RemoteJobClient 是研判层 3 件的唯一出口**——保证 driver 离线 / 笔记本关停可恢复。MVP 期 `--sync` 降级开关只允许 dev / debug 用。
 4. **lock 是 cooperative，不是分布式锁**——vision §6.4.5(a) 已认代价；冲突发生时该轮重做，不在 trace-core 加 ZooKeeper / etcd。
 5. **watch / list 不抢 lock**——读路径无锁，多人监控不干扰；可装到 CI dashboard 持续显示。
@@ -540,14 +768,30 @@ src/trace-core/replay/
 3. **mode 三档 MVP 期单档实现**——MVP 仅实现 `compare`（最常用），`strict` / `explore` 留 enum 但报"not yet implemented"；保留 flag 是为了未来扩展不破坏命令字面值。
 4. **diff 走 B1 提供的 `/traces/diff?a=&b=`**（vision §7.M3 扩张接口已包含）——CLI 端不本地实现 span diff 算法。如果 M3 一期没 ship `/traces/diff`，CLI 暂时拉两条 trace 在本地做 naive diff，留 TODO。
 
+**核心流程与逻辑（以 `kweaver trace replay` 为例）**：
+
+1. **目标定位**：
+   - 调用 `locator.ts`。如果用户提供的是 `trace_id`，则直接使用。
+   - 如果提供的是 `--experiment-id` 和 `--query`，则调用 B1 (ObservabilityClient) 查询对应的 Trace ID。
+2. **上下文拉取与 Payload 构造**：
+   - 调用 B1 获取原始 Trace 的详细内容（特别是输入的 User Query 和初始上下文）。
+   - 调用 `request-builder.ts` 构造 Replay 请求体，**强制注入** `replay_of=<原 trace_id>` 属性。
+3. **提交重放任务**：
+   - 调用 B2 (RemoteJobClient) 将 Replay 请求异步提交给远端 Decision Agent (DA)。
+   - 远端 DA 使用新的 Trial 配置重新执行该 Query，并将新的 Trace 上报到 M1。
+4. **结果获取与 Diff**：
+   - CLI 轮询 B2 直到任务完成，获取新生成的 `new_trace_id`。
+   - 调用 B1 的 `/traces/diff?a=<old>&b=<new>` 接口（或在本地进行基础 Diff）。
+   - `output.ts` 将步骤数、工具选择、检索命中、最终输出等差异格式化输出为 YAML 或直接在终端打印。
+
 ### 3.5 M8 Publish Registry — `kweaver trace bundle`
 
 **命令树**（vision §7.M8）：
 
 ```
-kweaver trace bundle submit <experiment-folder>          # 强制 manifest 校验 → commit 到 publish-registry
-kweaver trace bundle show   <bundle-id>                  # git show + 解析（便利包装）
-kweaver trace bundle list   [--experiment-id=<id>]       # git log/目录扫描（便利包装）
+kweaver trace bundle submit <experiment-folder> [--registry=<git-url>]         # 强制 manifest 校验 → commit 到 publish-registry
+kweaver trace bundle show   <bundle-id>         [--registry=<git-url>]         # git show + 解析（便利包装）
+kweaver trace bundle list   [--experiment-id=<id>] [--registry=<git-url>]      # git log/目录扫描（便利包装）
 ```
 
 **代码模块布局**：
@@ -558,7 +802,7 @@ src/trace-core/bundle/
   ├── submit.ts              # 主流程 = 读 experiment outputs/ → schema 校验 → 出处证据 → commit + push
   ├── schema-check.ts        # 用 B5 校验 bundle.yaml + manifest.yaml；缺 manifest 立刻 reject
   ├── provenance.ts          # 从 events.jsonl 抽 trace_id 列表 / round / triage 报告引用 → provenance.yaml
-  ├── registry-driver.ts     # 解析 publish-registry URL（kweaver config + mission.md override）→ clone-or-pull → 写 bundles/<id>/* → push
+  ├── registry-driver.ts     # 解析 publish-registry URL（--registry + mission.md + kweaver config）→ clone-or-pull → 写 bundles/<id>/* → push
   ├── show.ts                # git show + yaml 解析
   └── list.ts                # git log --grep / 目录扫描
 ```
@@ -577,6 +821,23 @@ src/trace-core/bundle/
 3. **show / list 是 git 协议的便利壳**：内部直接 spawn `git show` / `git log`，不走任何 service。read 路径走 git 协议、submit 路径走 CLI，没有 read service。
 4. **未来 binary asset（prompt 模板 / retrieval 索引）走 git LFS** —— vision §9.5 已留口子；MVP 不实现 LFS 集成，bundle.yaml 只引 reference。
 
+**核心流程与逻辑（以 `bundle submit` 为例）**：
+
+1. **前置校验**：
+   - 读取实验目录下的 `outputs/bundle.yaml` 和 `outputs/manifest.yaml`。
+   - 调用 B5 (SchemaRegistry) 进行严苛校验。如果缺少 `manifest.yaml` 或内容不合规，**立刻拒绝（Reject）**并退出。
+2. **构建发布包（Bundle Building）**：
+   - 在本地临时目录中，将 `bundle.yaml`、`manifest.yaml` 归档。
+   - 调用 `provenance.ts`，从 `.trace-state/events.jsonl` 中抽取支撑该 Trial 的 Trace ID 列表、Round 轮次、以及 Triage 报告引用，生成 `provenance.yaml`（出处证据）。
+3. **计算 ID 与事务性准备**：
+   - 根据 `<experiment-id>-<short-sha-of-bundle.yaml>` 计算出全局唯一的 `bundle-id`。
+   - 调用 B4 (GitStateDriver) 将 publish-registry 仓库 `clone-or-pull` 到本地。
+4. **并发控制与提交**：
+   - 检查 `bundles/<bundle-id>/` 目录是否已存在。若存在且内容不同，报 `BUNDLE_ID_COLLISION`。
+   - 将临时目录中的文件写入 `bundles/<bundle-id>/`。
+   - 执行 `git add` 和 `commit`。
+   - 执行 `push`。若遇到冲突，自动进行 `pull --rebase` 并重试，默认最多 3 次（见下方并发协议）。
+
 **registry 写入并发协议**：
 
 1. `registry-driver` 每次写入前执行 `clone-or-pull --rebase`，写入后 `commit`，再 `push`。
@@ -590,7 +851,7 @@ src/trace-core/bundle/
 **命令树**（vision §7.M9，砍 CronJob 后纯 CLI）：
 
 ```
-kweaver trace verify check <bundle-id>                   # 单 bundle 对账：拉生产 trace + 读 manifest + 写 verification.yaml + 抽 curation-feed
+kweaver trace verify check <bundle-id> [--registry=<git-url>]     # 单 bundle 对账：拉生产 trace + 读 manifest + 写 verification.yaml + 抽 curation-feed
 kweaver trace verify scan  [--registry=<git-url>]        # 扫整个 publish-registry，对到 cadence 时刻的 bundle 批量触发 check
 ```
 
@@ -641,12 +902,30 @@ M9 spec 提供这个 yaml 作为 reference impl，由 publish-registry 仓库管
 2. **AHE 阈值由 manifest.yaml 自身声明**——每个 bundle 自带阈值（不同任务 acceptable hit-rate 不同）；CLI 不硬编码全局阈值。
 3. **curation-feed.yaml 是飞轮唯一闭合点**——抽出的新失败模式 commit 到 publish-registry 后，下次任意人 `kweaver trace curate scan` 时通过 §3.1 的 feed-pickup 拾取。
 
+**核心流程与逻辑（以 `verify check` 为例）**：
+
+1. **资源加载与环境准备**：
+   - 根据输入的 `bundle-id`，调用 B4 (GitStateDriver) 从 publish-registry 仓库中读取该 Bundle 的 `manifest.yaml`。
+   - 提取 Manifest 中声明的预期修复（Predicted Fixes）和预期风险（Predicted Risks）。
+2. **生产数据拉取**：
+   - 调用 B1 (ObservabilityClient)，根据 `bundle_id` 或 `agent_id`，以及时间窗口，拉取该 Bundle 部署后的真实生产 Trace。
+3. **对账与评估（Manifest Reconcile）**：
+   - 调用 `manifest-reconcile.ts`。
+   - 检查真实 Trace 中，原本应该被修复的错误是否还在发生（计算命中率）。
+   - 检查原本预期的风险是否出现（计算出现率）。
+4. **新失败模式抽取（飞轮闭合）**：
+   - 调用 `failure-extract.ts`。如果发现生产 Trace 中出现了 Manifest 未记录的新失败模式（如未预期的死循环或特定报错）：
+     - 将其格式化为 Curation Rule 格式，追加到该 Bundle 目录下的 `curation-feed.yaml` 中，完成数据飞轮的闭合。
+5. **报告输出与提交**：
+   - 调用 `report.ts` 生成 `verification.yaml` 报告，包含偏离指标和是否需要回退的建议。
+   - 调用 B4 将报告 commit 并 push 回 publish-registry 的 `verifications/` 目录下。
+
 ### 3.7 MX1 Schema — `kweaver trace schema`
 
 **命令树**（砍 CronJob 后）：
 
 ```
-kweaver trace schema validate <file>                                          # 开发者本地：单文件 ajv 校验
+kweaver trace schema validate <file> [--kind=<kind>]                          # 开发者本地：单文件 ajv 校验（含 eval-set / eval-set-index）
 kweaver trace schema audit    [--time-window=1h] [--sample=1000] [--out=]     # CI 周期调用：跨 span 不变量 / 漂移率 / 准入率 报告
 ```
 
@@ -664,7 +943,7 @@ src/trace-core/schema/                              # B5 SchemaRegistry 主体
   │   └── admit-rate.ts      # L1/L2 准入率指标
   ├── audit-orchestrator.ts  # audit 子命令主流程（抽样 → 三件并行 → 合 report）
   ├── report.ts              # audit 报告 yaml 序列化
-  └── v1/                    # ← schema 静态文件 mirror（trace.yaml / experiment.yaml / bundle.yaml / manifest.yaml / eval-set.yaml）
+  └── v1/                    # ← schema 静态文件 mirror（trace.yaml / experiment.yaml / bundle.yaml / manifest.yaml / eval-set.yaml / eval-set-index.yaml）
 ```
 
 **依赖**：
@@ -696,8 +975,9 @@ jobs:
 
 1. **静态 schema 文件**住 `src/trace-core/schema/v1/`，build 时由 tsconfig `include` 拷进 dist；`schema-mirrors.lock` 记录同步源 SHA。
 2. **validate 与 audit 共享 ajv 实例**——一次 schema load，两个命令复用；冷启动加载 5–10ms 量级，可忽略。
-3. **inline 校验仍然在 M1 otelcol 端做**（vision §7.M1 的 schema-check hook 不动）；CLI 这边只做：①单文件本地校验给开发者用；②周期 audit 拿 inline 干不了的三件（跨 span / 漂移 / 准入）。两条路径互不干涉。
-4. **audit 抽样不全量**——CI runner 离 M2 远，全量校验数据量过大；vision §7.MX1 本来就钉死抽样。`--sample=1000` 默认值在初期可调。
+3. **validate 的 kind 判定**：优先使用 `--kind`；未传时按文件名约定推断（`index.yaml` 且父目录位于 `eval-sets/*/` → `eval-set-index`；`bundle.yaml` / `manifest.yaml` / `verification.yaml` / `eval-set*.yaml` / `trace*.json` / `experiment*.yaml`）；仍无法推断则报 `SCHEMA_KIND_REQUIRED`，不猜。
+4. **inline 校验仍然在 M1 otelcol 端做**（vision §7.M1 的 schema-check hook 不动）；CLI 这边只做：①单文件本地校验给开发者用；②周期 audit 拿 inline 干不了的三件（跨 span / 漂移 / 准入）。两条路径互不干涉。
+5. **audit 抽样不全量**——CI runner 离 M2 远，全量校验数据量过大；vision §7.MX1 本来就钉死抽样。`--sample=1000` 默认值在初期可调。
 
 ## §4 测试与发布策略
 
@@ -713,8 +993,8 @@ jobs:
 
 4. **trace-core 单元测**（`test/trace-core/<module>.test.ts`）：FSM transition / lock / events.jsonl replay / git-state 等内核组件独立测试
 5. **schema mirror lint**（CI step）：`schema-mirrors.lock` 中每条 source 的 SHA + target hash 一致性
-6. **状态恢复 golden tests**：固定一组 `events.jsonl` 样本，断言 replay 后的 state / pending_jobs / trial-forest 完全一致
-7. **crash-point tests**：覆盖 `submit 成功但 job_submitted 未写`、`job_submitted 已写但快照未刷`、`round_completed 已写但 git commit 失败` 三类断点
+6. **状态恢复 golden tests**：固定一组 `events.jsonl + jobs.jsonl` 样本，断言 replay 后的 state / pending_jobs / trial-forest 完全一致
+7. **crash-point tests**：覆盖 `job_submit_intent 已写但 submit 未完成`、`submit 成功但 jobs.jsonl job_submitted 未写`、`jobs.jsonl job_completed 已写但业务事件未写`、`round_completed 已写但 git commit 失败` 四类断点
 8. **git 并发 tests**：用临时 bare repo 模拟 registry push conflict、idempotent submit、verification 并发追加、curation-feed 合并冲突
 9. **安全输出 tests**：默认输出不得包含 prompt / tool result 全文；`--json` 与 pretty 路径同样遵守 redaction；`--unsafe-full` 需要显式开关
 
@@ -746,14 +1026,14 @@ jobs:
 | **P4** | §7.MX1 形态与路径 | 形态：从"git 化静态契约 + CronJob 校验器"改为"git 化静态契约 + CLI 校验器 + CI 定时 workflow"；删除 `trace-ai/charts/schema-guard/`；新增 `trace-ai/.github/workflows/schema-audit.yml`；CLI 路径 `kweaver-sdk/.../src/commands/trace/schema/` + `src/trace-core/schema/` |
 | **P5** | §7.M9 形态 | 从 "CronJob + CLI" 改为 "CLI"；删除 `trace-ai/charts/post-deploy-verify/`；新增 `publish-registry/.github/workflows/verify.yml`（M9 spec 提供 reference impl） |
 | **P6** | §7.MX1 schema mirror 同步机制 | 新增段落：schema 静态契约 SSOT 在 `trace-ai/schema/v1/`；kweaver-sdk monorepo 持有 mirror 副本于 `packages/typescript/src/trace-core/schema/v1/`，由 trace-ai 维护者在 schema PR 里同步推送，并附 `packages/typescript/schema-mirrors.lock` 记录同步源 SHA + CI lint 校验一致性 |
-| **P7** | §6.4 新增 §6.4.7 | publish-registry URL 解析：默认走 `kweaver config trace.publish-registry-url`（per-profile）；mission.md frontmatter 可声明覆盖；优先级 mission.md > kweaver config > 报错 |
+| **P7** | §6.4 新增 §6.4.7 | publish-registry URL 解析：默认走 `kweaver config trace.publish-registry-url`（per-profile）；mission.md frontmatter 可声明覆盖；无 experiment-folder 上下文的命令可用 `--registry` 覆盖；优先级 `--registry` > mission.md > kweaver config > 报错 |
 | **P8** | §7.M6 内部子组件段末尾 | 增补："研判层 3 件（Generator / Scorer / Triage Agent）在 CLI 进程内是 thin wrapper——智能决策发生在远端智能体层，CLI 只做调用编排、结果合成、与 FSM 的 binding；元控制层 2 件（Coordinator / Termination Decider）才是真正本地逻辑" |
 | **P9** | §7.M7 "重放本身产 trace 喂回 M1" 措辞 | 改写：远端 DA 在 replay 时正常打 OTel；CLI 只在 replay 请求里带 `replay_of=<原 trace_id>` attribute，由 DA 标进新 trace 的 root span |
 | **P10** | 附录 A 术语迁移表 | 加注：`kweaver agent trace <conv_id>`（v0.7.4 已上线，agent 资源的 trace 动作）vs `kweaver trace …`（本设计新增的 trace-ai 子命名空间）；加 "trace-ai/cli/* → kweaver-sdk/packages/typescript/src/commands/trace/*" 仓库物件演进记录 |
 | **P11** | §6.4.5 已知反方意见 | 新增 (d)："CI runner 距离 M2 与凭证管理（GitHub Secrets / 等价物）是 above-L0 周期性触发的设计内在约束；audit 需保持抽样而非全量；这是新设计的内在约束，不是回退选项" |
 | **P12** | §7.4.1 服务调用矩阵 | 删 MX1 CronJob / M9 CronJob 两行；M9 CronJob 行合并到 M9 CLI；脚注说明触发源换成 git CI workflow |
 | **P13** | §6.4.3 abort 协议措辞 | 当前写"`trace exp abort` 写终止意图到 lock.json"；改为：写独立文件 `.trace-state/abort.signal`；Coordinator 在 FSM checkpoint 间 poll；语义清晰、lock 协议保持纯净 |
-| **P14** | §7.M6 state 真源描述 | 当前并列 "events.jsonl + trial-forest.yaml + jobs.jsonl + rounds/round-N.yaml + lock.json"；改为分主次："events.jsonl 是 append-only 真源（FSM journal）；trial-forest.yaml 与 rounds/round-N.yaml 是从 events.jsonl 派生的快照，崩坏可重建；jobs.jsonl 与 lock.json 是各自独立的辅助流（远端 job 流水 / 心跳锁），不属派生范畴" |
+| **P14** | §7.M6 state 真源描述 | 当前并列 "events.jsonl + trial-forest.yaml + jobs.jsonl + rounds/round-N.yaml + lock.json"；改为分主次："events.jsonl 是 FSM 真源；jobs.jsonl 只记录远端 job transport 生命周期；trial-forest.yaml 与 rounds/round-N.yaml 是派生快照；lock.json / abort.signal 是运行期控制文件" |
 | **P15** | §9.3 安全与隐私 | 新增一句："redaction rules 是 trace-ai schema 之外的契约（脱敏 pattern 是企业敏感信息），由组织自建于 `<repo>/redaction-rules/`，不进 schema/v1/" |
 
 ---
@@ -802,10 +1082,13 @@ src/trace-core/
   │   └── watch.ts
 
   ├── curate/                             # M4 专属
+  │   ├── planner.ts
+  │   ├── policy.ts
   │   ├── signal-probe.ts
   │   ├── invariant.ts
   │   ├── latent-failure.ts
   │   ├── rules.ts
+  │   ├── watermark.ts
   │   ├── feed-pickup.ts
   │   └── output.ts
 
