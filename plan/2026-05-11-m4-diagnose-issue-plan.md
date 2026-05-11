@@ -138,6 +138,7 @@ PR-B（agent + rubric，4-6d，依赖 PR-A）：
 | 2026-05-11 | 重切 4→3 issue | "做就一次做对" — 单 issue 1 条规则太薄；5 条规则 + validate 一次 ship 完整可用的 rule-only diagnose |
 | 2026-05-11 | 锁定决定：M3 走 _search term 查 / schema 校验用 zod / 规则用 yaml+TS 谓词混合 / report 走 meta+findings[] / 默认 builtin+cwd 混合装载 | brainstorming 澄清问题逐一收敛 |
 | 2026-05-11 | **重大重切：3→2 issue。原 #1 (rule-only) 与 #2 (LLM 双轨) 合并为新 #1。补 rubric 规则类型 + 跨 trace-ai 公共 agent 抽象 + claude-code subprocess provider；scan 上提为 #2。估算 12-14d 分 2 PR 落地** | 用户指出之前设计盲点：只有 symbolic 规则是不够的，需要 rubric + agent 判定；agent 抽象应跨 trace-ai 模块复用而不是闷在 diagnose 里。承认是真盲点 |
+| 2026-05-11 | spec §"Industry Alignment" 加固：明确"Stage-1 triage（symbolic）+ Stage-2 verdict（rubric）"分层叙事；规则 yaml 加 `taxonomy` 块（Signals 3 轴 + MS 6 类）；rubric `output_schema` 强制 `first_violating_step_id` 字段 | 用户 challenge "行业是不是这么做"，调研发现 LangSmith / Phoenix / Braintrust / Langfuse / OpenAI Evals / Anthropic / MS taxonomy / arXiv 2604.00356 (Signals) 全部走两段式 deterministic + judge，且 vision §3.1 引用过的 Signals 论文几乎是这个设计的"已发表对照组"。趁早把两段式框架写进 spec，避免实现期再返工 |
 
 ## 4. 跨 issue 共用资产
 
