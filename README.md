@@ -19,8 +19,9 @@ plan-traceai/
 ├── README.md                      ← 你正在看的入口
 ├── status_quo/                    ← 现状：trace-ai 一期已经长成什么样
 │   └── 附录-完整trace样本/         ← 一条真实 trace 的三视图（OpenSearch raw / by-conversation / 拓扑树解读）
-└── vision/                        ← 未来：trace-ai 重新立形的设计 spec
-    └── 2026-05-07-trace-ai-continuous-learning-design.md   ← 顶层 Vision Spec（vision-level，不锁 MVP）
+├── vision/                        ← 未来：trace-ai 重新立形的设计 spec
+│   └── 2026-05-07-trace-ai-continuous-learning-design.md   ← 顶层 Vision Spec（vision-level，不锁 MVP）
+└── plan/                          ← 执行计划：vision 落地的 issue 切分与进度（living 文档，跟随实现演化）
 ```
 
 ## 关键外部路径
