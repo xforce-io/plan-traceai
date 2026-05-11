@@ -26,7 +26,8 @@
 
 | 字段 | 值 |
 |------|-----|
-| 状态 | ⬜ pending |
+| 状态 | 🟡 in progress |
+| Issue | [kweaver-ai/kweaver-sdk#120](https://github.com/kweaver-ai/kweaver-sdk/issues/120) |
 | PR | — |
 | 估算 | 4-5d |
 
