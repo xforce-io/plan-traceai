@@ -28,8 +28,8 @@
 |------|-----|
 | 状态 | 🟡 in progress |
 | Issue | [kweaver-ai/kweaver-sdk#120](https://github.com/kweaver-ai/kweaver-sdk/issues/120) |
-| PR | — / — （PR-A symbolic / PR-B agent + rubric） |
-| 估算 | 12-14d |
+| PR | — / — （PR-A symbolic / PR-B agent + rubric + within-trace synthesizer） |
+| 估算 | 14-16d |
 
 **用户故事**：给定一条线上 trace 的 `trace_id`，跑：
 
@@ -80,15 +80,16 @@ PR-A（symbolic 路径，6-8d）：
 - `kweaver trace diagnose rules validate <rule.yaml>` 子命令
 - e2e：5 条合成 fixture 各命中预期；status_quo 真 fixture 全不命中
 
-PR-B（agent + rubric，4-6d，依赖 PR-A）：
+PR-B（agent + rubric + 内部综合，6-8d，依赖 PR-A）：
 - `trace-core/agent/` 公共抽象层：`AgentProvider` / `JudgmentRequest` / `JudgmentResponse` / `AgentRegistry` / `PromptTemplateRegistry`
 - `providers/claude-code-subprocess.ts`：spawn `claude` CLI，prompt 注入 + 结构化输出 schema 提示 + JSON 解析重试 + 超时 + 不在 PATH 时 fail-fast
 - `providers/stub.ts`：测试用，`KWEAVER_DIAGNOSE_AGENT_PROVIDER=stub` 切到 fixture 回放
 - `providers/decision-agent-remote.ts`：仅 stub + TODO 注释（post-MVP 实现）
-- `trace-core/diagnose/agent-binding.ts`：把 Rubric → AgentProvider.invoke → RubricJudgment
-- 1 条 builtin rubric 规则（`tool_retry_intent_mismatch`）+ prompt template + 合成 fixture
-- `--no-llm` 反转：默认走双 pillar；`--no-llm` 时 rubric 规则跳过 + warn，仍跑 5 条 symbolic
-- e2e（PR-B 增量）：rubric fixture 走 stub provider，断言 finding 含 rubric 输出字段
+- `trace-core/diagnose/agent-binding.ts`：Stage-2 — Rubric → AgentProvider.invoke → RubricJudgment
+- `trace-core/diagnose/synthesizer.ts`：Stage-3 within-trace — (meta, findings) → Summary；agent 模式走 `builtin:within-trace-synthesizer-v1` prompt template，`--no-llm` / agent 失败时走 deterministic template fallback；`run.synthesizer_mode` 记录走了哪条
+- 1 条 builtin rubric 规则（`tool_retry_intent_mismatch`）+ rubric prompt template + synthesizer prompt template + 合成 fixture
+- `--no-llm` 反转：默认走双 pillar + agent synthesizer；`--no-llm` 时 rubric 跳过 + warn，synthesizer 退到 template 模式仍输出 summary
+- e2e（PR-B 增量）：rubric fixture 走 stub provider；synthesizer 在 stub provider / template 两种模式都断言 summary 字段非空、cross_finding_links 在 symbolic+rubric 同 span 命中时被填
 
 **明确不做**（推到后续 issue 或 post-MVP）：
 
@@ -106,20 +107,21 @@ PR-B（agent + rubric，4-6d，依赖 PR-A）：
 
 ---
 
-### #2 【traceai】用户能批量诊断一段时间窗口内的可疑 trace（scan 模式）
+### #2 【traceai】用户能批量诊断一段时间窗口内的可疑 trace（scan 模式 + 跨 trace 综合）
 
 | 字段 | 值 |
 |------|-----|
 | 状态 | ⬜ pending |
 | PR | — |
-| 估算 | 3-4d |
+| 估算 | 5-7d |
 
-**用户故事**：跑 `kweaver trace diagnose scan --time-range=24h --tenant=acme --out=diagnosis/latest/`，得到一个目录的诊断报告，内存稳定、可中断恢复。
+**用户故事**：跑 `kweaver trace diagnose scan --time-range=24h --tenant=acme --out=diagnosis/latest/`，得到一个目录的诊断报告 + 一份 `scan-summary.yaml` 跨 trace 综合报告，内存稳定、可中断恢复。综合报告告诉用户"这段时间内最严重的失败模式是 X，受影响最重的 agent 是 Y，建议优先修 Z"——不是一坨 trace 报告罗列。
 
 **范围**：
 
 - B1 `searchTracesStream(query, page)` 流式分页拉取
-- scan pipeline：symbolic 规则先跑（廉价）→ 命中再喂 rubric 规则（贵）
+- scan pipeline：Stage-1 symbolic 规则先跑（廉价，作为 triage gate）→ 命中再喂 Stage-2 rubric 规则（贵）→ Stage-3 within-trace 综合（每条 trace 一份）
+- **Stage-4 cross-trace 综合**（issue #2 新增）：`scan-synthesizer` 聚合 N 份 trace 报告 → `scan-summary.yaml`（rule 频次、agent 排名、模式聚类、top-K 改进建议）；agent 模式 + template fallback 同 within-trace synthesizer 一致
 - `--max-parallel` 并发控制
 - batch payload `{shared_context, per_trace_overlay[]}` dedup（多 trace 同送 agent 时去重共享上下文）
 - 输出去重（按 `trace_id + rule_id`）
@@ -128,6 +130,8 @@ PR-B（agent + rubric，4-6d，依赖 PR-A）：
 
 - 对 100+ trace 跑 scan：内存稳定、报告无重复、并发控制生效
 - token / context 超限时 fail-fast 提示拆批，不静默截断
+- `scan-summary.yaml` 在 `--no-llm` 模式下走 deterministic 聚合模板（rule 频次、severity 排序、agent 出现次数）；agent 模式额外有 LLM 生成的 narrative summary
+- cross-trace 综合的 schema (`scan-summary/v1`) 与 within-trace summary 共享部分字段结构（headline / fix_priority / cross_links），让用户跨级别看报告时心智一致
 
 ## 3. 变更日志
 
@@ -139,6 +143,7 @@ PR-B（agent + rubric，4-6d，依赖 PR-A）：
 | 2026-05-11 | 锁定决定：M3 走 _search term 查 / schema 校验用 zod / 规则用 yaml+TS 谓词混合 / report 走 meta+findings[] / 默认 builtin+cwd 混合装载 | brainstorming 澄清问题逐一收敛 |
 | 2026-05-11 | **重大重切：3→2 issue。原 #1 (rule-only) 与 #2 (LLM 双轨) 合并为新 #1。补 rubric 规则类型 + 跨 trace-ai 公共 agent 抽象 + claude-code subprocess provider；scan 上提为 #2。估算 12-14d 分 2 PR 落地** | 用户指出之前设计盲点：只有 symbolic 规则是不够的，需要 rubric + agent 判定；agent 抽象应跨 trace-ai 模块复用而不是闷在 diagnose 里。承认是真盲点 |
 | 2026-05-11 | spec §"Industry Alignment" 加固：明确"Stage-1 triage（symbolic）+ Stage-2 verdict（rubric）"分层叙事；规则 yaml 加 `taxonomy` 块（Signals 3 轴 + MS 6 类）；rubric `output_schema` 强制 `first_violating_step_id` 字段 | 用户 challenge "行业是不是这么做"，调研发现 LangSmith / Phoenix / Braintrust / Langfuse / OpenAI Evals / Anthropic / MS taxonomy / arXiv 2604.00356 (Signals) 全部走两段式 deterministic + judge，且 vision §3.1 引用过的 Signals 论文几乎是这个设计的"已发表对照组"。趁早把两段式框架写进 spec，避免实现期再返工 |
+| 2026-05-11 | 加 Stage-3 within-trace synthesizer 到 #1（spec + plan + issue），#2 scope 增加 Stage-4 cross-trace synthesizer。#1 估算 12-14d → 14-16d；#2 估算 3-4d → 5-7d | 用户 challenge "只见树木不见森林"——单 trace 的 N findings 是局部，需要 forest view。within-trace synthesizer 处理"一份报告里多条 finding 的去重串联"；cross-trace synthesizer（scan）处理"100+ trace 的模式聚合 + 排名 + 优先级"。架构上是 trace-core/agent/ 公共层的第二个 binding，和 agent-binding.ts 平级 |
 
 ## 4. 跨 issue 共用资产
 
