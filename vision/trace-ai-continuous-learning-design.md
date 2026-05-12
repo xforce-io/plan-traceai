@@ -41,7 +41,7 @@ trace-ai 当前**只完成了 L0 的一半**（schema 不充分），L1 / L2 几
 
 | 层级 | 用户故事 | 必须能力 |
 |---|---|---|
-| **MVP-A：轨迹诊断** | 用户已有线上失败 / 可疑 trace，KWeaver 帮他识别 agent program 的不合理性，并给出带证据的修改建议 | M4 Diagnosis 双轨（静态信号规则 + 至少 5 条 baseline + diagnose-provider LLM wrapper + 诊断报告 schema）、B2 RemoteJobClient、M3 trace query、MX1 `schema validate` |
+| **MVP-A：轨迹诊断** | 用户已有线上失败 / 可疑 trace，KWeaver 帮他识别 agent program 的不合理性，并给出带证据的修改建议 | M4 Diagnosis 双 pillar（symbolic + rubric + within-trace synthesizer + 5+1 baseline + 诊断报告 schema）、batch (`--traces=<id-list>`) + cross-trace synthesizer、`agent-providers/` 公共抽象 + claude-code subprocess provider、M3 trace query。**`schema validate` 推到 post-MVP**（依赖 MX1 SSOT YAML 先建，M5 是第一个真消费者）；**B2 RemoteJobClient 推到 MVP-B**（M4 走本地 claude-code subprocess，无需远端 job） |
 | **MVP-B：eval-set 构建与测试** | 用户把诊断出的失败模式沉淀成可复现 eval cases，并用当前 agent 配置跑 baseline test | M5 `eval-set build`、M5 `eval-set test`、脱敏、baseline test report |
 | **MVP-C：单路径持续迭代** | 用户沿一个明确方向修改 prompt / skill / BKN / tool contract / workflow，并持续用同一套 eval-set 验证是否改善 | M6 single-path Experiment Engine、ExpStore、RemoteJob submit/poll、outputs |
 | **Post-MVP：多路径 / 自动化飞轮增强** | 当单路径手工流程成为瓶颈后，再做多 Trial 并行、自动回流和跨团队资产化 | Trial Forest、多路径探索、M7 Replay、M5 `relabel`、MX1 `schema audit`、`exp watch/list`、Git checkpoint、M8/M9 |
@@ -218,7 +218,7 @@ trace-ai 的技术目标围绕三轴展开：**可观测 → 可分析 → 闭�
 下列工程约束不是技术目标的"主轴"，而是支撑这三轴落地的边界：放到 §9 边界考虑里详细写，§3 这里只点名。物理形态约束分两类（详见 §6.4）：
 
 - **服务面（M1 / M2 / M3）**：高可用 / 无状态横向扩展（K8s Deployment / StatefulSet）；写入 / 查询 SLA（沿用一期 PRD：trace 详情 P95 ≤ 2s、5 分钟可查询率 ≥ 95%、查询服务 SLA ≥ 99.9%）
-- **CLI 面（MVP-A：M4 diagnose + MX1 validate；MVP-B：M5 build/test；MVP-C：M6 single-path；post-MVP：M7 / MX1 audit / M5 relabel / M8 / M9 等）**：单 binary 多子命令；MVP-C 状态走 `exp-store` 本地文件，不依赖中央 RDB；Git checkpoint / `exp watch` / `exp list` / 多路径 Trial Forest 推到 post-MVP
+- **CLI 面（MVP-A：M4 diagnose（single + batch）；MVP-B：M5 build/test + MX1 SSOT YAML + `schema validate`；MVP-C：M6 single-path；post-MVP：M7 / MX1 audit（假设待重审，可能下沉 M4）/ M5 relabel / M8 / M9 / `diagnose scan --time-range=` 时间窗形态 等）**：单 binary 多子命令；MVP-C 状态走 `exp-store` 本地文件，不依赖中央 RDB；Git checkpoint / `exp watch` / `exp list` / 多路径 Trial Forest 推到 post-MVP
 - 模块边界与契约稳定（每个 M-spec 独立演进；CLI 子命令语义版本化；服务面 API 走 `/api/<module>/v1/...` 版本化）
 - 国产化适配（HCE / openEuler / dm8 / MariaDB）
 - 可部署、可灰度：服务面走 Helm + feature flag；CLI 走二进制版本管理（每条命令对自己的 flag / 行为 SemVer）
@@ -647,7 +647,7 @@ graph TB
 | **观测底座层 Observability** | 采集、归一化、存储、查询、Schema SSOT | M1 otelcol · M2 Trace Store（OpenSearch + 索引模板） · M3 agent-observability · MX1 Schema SSOT |
 | **资产闭环（侧链，出 trace-ai 边界）** | 收敛 → 资产化 → 上线 → 验证 → 喂回 | MVP：M6 outputs + 外部人审 / 发布平台；post-MVP：M8/M9 |
 
-> 上图中元控制层的 `Coordinator / Termination Decider`、分析层的 `Generator / Scorer / Triage Agent`、执行层的 `Executor` —— 这 6 个子件合在一起就是 **Experiment Engine** 这一个逻辑模块（编号 M6，跨 3 层），并不是 6 个独立模块。其余每个框是独立逻辑模块（**物理形态见 §6.4** —— L0 三件套是常驻 Service；MVP-A 是 M4 diagnose + MX1 validate；MVP-B 是 M5 build/test；MVP-C 是 M6 single-path；M7/M8/M9 deferred）。详见 §7.2 M6。
+> 上图中元控制层的 `Coordinator / Termination Decider`、分析层的 `Generator / Scorer / Triage Agent`、执行层的 `Executor` —— 这 6 个子件合在一起就是 **Experiment Engine** 这一个逻辑模块（编号 M6，跨 3 层），并不是 6 个独立模块。其余每个框是独立逻辑模块（**物理形态见 §6.4** —— L0 三件套是常驻 Service；MVP-A 是 M4 diagnose（single + batch，含 within-trace + cross-trace synthesizer）；MVP-B 是 M5 build/test + MX1 SSOT + `schema validate`；MVP-C 是 M6 single-path；M7/M8/M9 / MX1 audit deferred）。详见 §7.2 M6。
 
 > **controller 边界**：MVP 不新增横跨 M4/M5/M6 的全局 Triage Controller。调度边界保持局部：M4 的 Diagnosis Planner 只把一次 diagnose/scan 的策略编译成执行计划；M6 Coordinator 只管单路径实验 FSM；Triage Agent 只对给定 round evidence 做诊断。
 
@@ -761,11 +761,11 @@ stateDiagram
 | M1 otelcol | **Service** (K8s Deployment) | OTLP gRPC :4317 / HTTP :4318 |
 | M2 OpenSearch | **Service** (K8s StatefulSet 或外置) | trace 存储 + 索引模板 |
 | M3 agent-observability | **Service** (K8s Deployment) | HTTP `/api/agent-observability/v1/...`，给 UI / 排障工具 / 全部 CLI 共用查询入口 |
-| MX1 Schema | **git 化静态契约 + CLI 校验器** | MVP-A：`kweaver trace schema validate`；post-MVP：`schema audit` 与周期 workflow |
-| M4 Diagnosis | **CLI** | MVP-A：`kweaver trace diagnose <trace_id>` / `diagnose scan ...`；post-MVP：curation feed 自动聚合 |
+| MX1 Schema | **git 化静态契约 + CLI 校验器** | **MVP-A：仅 zod 内核（嵌在 M4 diagnose/schemas.ts）+ `diagnose rules validate` 子命令**；MVP-B：SSOT YAML 文件 + `kweaver trace schema validate`（与 M5 一起建）；post-MVP：`schema audit` 与周期 workflow（架构假设待重审：见 plan-traceai 2026-05-11 plan §3 change log 2026-05-12 行） |
+| M4 Diagnosis | **CLI** | MVP-A：`kweaver trace diagnose <conversation_id>` 单 trace / `diagnose --traces=<id-list>` 批量（含 within-trace + cross-trace synthesizer）；post-MVP：`diagnose scan --time-range=` 时间窗形态、curation feed 自动聚合 |
 | M5 Eval-Set Builder | **CLI** | MVP-B：`kweaver trace eval-set build/test ...`；post-MVP：`relabel` |
 | M6 Experiment Engine | **CLI 家族** + exp-store 可移植文件夹 | MVP-C：`run / resume / show / status / abort / doctor --mode=single-path`；post-MVP：`watch / list` + 多路径 |
-| M7 Replay | **post-MVP CLI** | `kweaver trace replay <trace_id> --trial v2`（深度诊断增强） |
+| M7 Replay | **post-MVP CLI** | `kweaver trace replay <conversation_id> --trial v2`（深度诊断增强） |
 | M8 Publish Registry | **post-MVP deferred** | MVP 不提供 `kweaver trace bundle ...`；M6 直接输出 `outputs/{bundle,manifest,provenance}.yaml` |
 | M9 Post-deploy Verify | **post-MVP deferred** | MVP 不提供 `kweaver trace verify ...`；上线后对账由外部发布平台或人工流程承担 |
 
@@ -773,7 +773,7 @@ stateDiagram
 
 - 常驻 Service：**3 个**（全在 L0 数据面：M1 / M2 / M3，住 kweaver 平台 / trace-ai 仓库）
 - CronJob：**0**
-- CLI 子命名空间：MVP-A 提供 `diagnose` + `schema validate`；MVP-B 加入 `eval-set build/test`；MVP-C 加入 `exp --mode=single-path`；`replay`、`schema audit`、`exp watch/list`、`eval-set relabel` 延后
+- CLI 子命名空间：MVP-A 提供 `diagnose <conversation_id>` 单 trace + `diagnose --traces=<id-list>` 批量 + `diagnose rules validate`；MVP-B 加入 `eval-set build/test` + `schema validate`（与 SSOT YAML 一起建）；MVP-C 加入 `exp --mode=single-path`；`replay`、`schema audit`（假设待重审）、`exp watch/list`、`eval-set relabel`、`diagnose scan --time-range=` 延后
 - **Above L0 零常驻服务、零 K8s 依赖** —— 控制面 100% 由实验文件夹 + CLI 承载；MVP 不依赖 publish-registry、verify CI、schema audit CI
 
 #### §6.4.2 控制态 vs 遥测态：双源真相（不引入 RDB 中央索引）
@@ -915,9 +915,9 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 
 - **阶段**：MVP-A。它是 trace-ai 的第一用户价值入口：从线上 trace 识别 agent program 的不合理性。
 - **形态**：**CLI**（无 service；详见 §6.4.1）
-- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/diagnose.ts` + `kweaver-sdk/packages/typescript/src/trace-core/diagnose/`（CLI 实现）+ 规则 yaml 走 git（默认存放约定 `<repo>/diagnosis-rules/`）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace.ts`（MVP-A 实测：单文件 dispatch）+ `kweaver-sdk/packages/typescript/src/trace-ai/diagnose/` + `kweaver-sdk/packages/typescript/src/trace-ai/scan/` + `kweaver-sdk/packages/typescript/src/agent-providers/`（CLI 实现）+ 规则 yaml 走 git（默认存放约定 `<repo>/diagnosis-rules/`）
 - **入口契约**：
-  - `kweaver trace diagnose <trace_id> [--rules=<path>] [--out=<file>]` — 对单条 trace 输出 diagnosis report（**case mode**）
+  - `kweaver trace diagnose <conversation_id> [--rules=<path>] [--out=<file>]` — 对单条 trace 输出 diagnosis report（**single mode**）
   - `kweaver trace diagnose --traces=<id-list> [--out=<file>]` — 对一组关联 trace 输出比较式诊断（**batch mode**，例：同一 query 在 K 个 trial 上的 K 条 trace）
   - `kweaver trace diagnose scan [--policy=<path>] [--time-range=] [--tenant=] [--rules=<path>] [--out=<dir>]` — 扫指定范围 trace，输出诊断候选
   - `kweaver trace diagnose rules list` / `kweaver trace diagnose rules validate <path>` — 规则发现 + 校验（规则本身是 git-tracked yaml，无需 register API）
@@ -929,35 +929,42 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
   - Diagnosis Planner（本地）：policy + flags → 一次性 DiagnosisPlan
   - Signal Probe（本地）：rule / FSM / schema signal 检测，输出 candidate spans + boolean signals
   - Trace Loader（本地）：通过 B1 拉 trace
-  - **Diagnose Provider Wrapper**（本地 thin wrapper；和 §7.M6 Generator / Triage 同性质）：拼 payload / B2 submit / poll / 解析返回
-  - Report Assembler（本地）：合成 diagnosis report yaml，`verify_with.suggested_eval_case` 直接可被 `eval-set build --diagnosis=` 吃下
-- **Post-MVP 扩展**：声明式不变量（BKN 反查）、latent failure / guard-code-as-oracle、curation feed 自动聚合
+  - **Rubric AgentBinding**（本地 thin wrapper；和 §7.M6 Generator / Triage 同性质）：拼 payload / `agent-providers/` 走 claude-code subprocess / 解析返回
+  - **Within-trace Synthesizer / Cross-trace Synthesizer**（PR-B / PR #124 已 ship）：单 trace findings 合 Summary；N 份 trace 报告聚合 scan-summary.yaml
+  - Report Assembler（本地）：合成 diagnosis report yaml + markdown，`verify_with.suggested_eval_case` 直接可被 `eval-set build --diagnosis=` 吃下
+- **Post-MVP 扩展**：声明式不变量（BKN 反查）、latent failure / guard-code-as-oracle、curation feed 自动聚合、`diagnose scan --time-range=` 时间窗扫描
 - **边界（vs M6 Triage）**：M4 的 subject 是 **agent program**（"代码哪里写得不合理"），单 / 批 trace 都做。**不做实验调度** —— 假设管理、剪枝、收敛判定、探索/利用 slot 分配是 M6 Triage 的职责，subject 是实验进程而非 agent 程序。
-- **依赖**：M3（HTTP 拉 trace）；本地 diagnosis-rules/；B2 RemoteJobClient（调远端 diagnose-provider）；BKN 仅在 post-MVP 不变量校验时需要
+- **依赖**：M3（HTTP 拉 trace）；本地 diagnosis-rules/；`agent-providers/`（claude-code subprocess provider 跑 rubric + synthesizer）；BKN 仅在 post-MVP 不变量校验时需要。**MVP-A 不依赖 B2 RemoteJobClient**（本地 spawn `claude` CLI，无远端 job 编排）
 
 #### M5 — Eval-Set Builder
 
 - **阶段**：`build` / `test` 属于 MVP-B；`relabel` 属于 post-MVP。
 - **形态**：**CLI**（无 service；详见 §6.4.1）
-- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/eval-set.ts` + `kweaver-sdk/packages/typescript/src/trace-core/eval-set/`（CLI 实现）+ eval set yaml 走 git（约定 `<repo>/eval-sets/<name>/`）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace.ts`（按需拆 trace/eval-set.ts）+ `kweaver-sdk/packages/typescript/src/trace-ai/eval-set/`（CLI 实现）+ eval set yaml 走 git（约定 `<repo>/eval-sets/<name>/`）
+- **eval-set 是一等输入，不只是 M5 产物**：三种来源汇一个 schema（`trace-eval-set/v1`）：
+  - **用户手写完整 shard** 直接放 `<repo>/eval-sets/<name>/`，由 mission.md 引用（**不走 build**，schema validate 后即可被 `test` / `exp` 吃）
+  - `eval-set build --diagnosis=<dir>` 从 M4 报告 lift（`verify_with.suggested_eval_case`）
+  - `eval-set build --queries=<file>` 从 `trace-eval-set-input/v1` 简化格式（只有 input + 可选 query_id / tags）lift，留 reference / assertions 占位
 - **入口契约**：
-  - `kweaver trace eval-set build [--diagnosis=<path>] [--queries=<path>] --out=<dir> [--with-reference]` — 由 diagnosis report 或显式 queries 构造 eval set yaml；用户已有请求/标准答案可直接放入 `eval-sets/<name>/` 并由 mission 引用
+  - `kweaver trace eval-set build [--diagnosis=<path> | --queries=<path>] --out=<dir> [--on-conflict=fail|skip|overwrite]` — 两个 source flag 互斥；query_id 冲突默认 fail-fast
   - `kweaver trace eval-set test <eval-set-dir> --candidate=<path> [--out=<dir>] [--sync]` — 用当前 agent 配置跑 baseline test report
   - post-MVP：`kweaver trace eval-set relabel <eval-set-dir> [--sync] [--force]` — hindsight relabel（LLM 在此启用），把 latent failure 重写为偏好对；正式路径走 async submit + poll，`--sync` 是 dev / debug 降级；默认要求目标文件 clean，`--force` 仅用于本地调试
   - **版本化即 git 版本**：不需要独立 GET /eval-sets/{id}，git checkout / blame 即取
 - **内部要做的事**：
-  - 从 diagnosis report / trace 圈选 query → 自动脱敏 → 入 eval set
+  - 从 diagnosis report / queries 简化输入圈选 query → 自动脱敏 → 入 eval set
   - 单 candidate baseline test：只确认问题可复现，不做多候选优化
-  - 两态支持：带 reference / 不带 reference
+  - reference 可选：reference 为空时 assertions[] 必须非空（zod refinement 强制）
+  - assertions 类型 MVP-B 枚举：`contains` / `not_contains` / `regex` / `tool_call_count` / `tool_call_order` / `semantic_match`（走 `agent-providers/`） / `latency_ms`
+  - **不做**：`--with-reference` flag 砍掉——"从历史 trace 提取成功标准输出"这件事属于 L2 hindsight relabel，放 post-MVP；MVP-B 期 reference 由 SME 手写或留空
   - post-MVP：Hindsight relabel，把 latent failure 的"原行为 vs 应有行为"沉淀为偏好对
   - eval set 版本化：直接 git 化、可 diff、可 PR review
-- **依赖**：MVP-B 需要 M4 diagnosis report、M3（HTTP 拉 trace 上下文）与远端 DA / evaluator；外部 LLM 仅 relabel 阶段需要，放到 post-MVP
+- **依赖**：MVP-B 需要 M4 diagnosis report、M3（HTTP 拉 trace 上下文）、B2 RemoteJobClient（调远端 DA / evaluator）、B5 SchemaRegistry（trace-eval-set/v1 + trace-eval-set-input/v1 + trace-eval-set-index/v1 三套 schema）；外部 LLM 仅 relabel 阶段需要，放到 post-MVP；`semantic_match` 类断言复用 MVP-A 已落的 `agent-providers/` 公共抽象
 
 #### M6 — Experiment Engine
 
 - **阶段**：MVP-C。它只做单路径持续迭代；多路径 Trial Forest 放 post-MVP。
 - **形态**：CLI 家族 + exp-store 可移植文件夹（**非常驻 service**；详见 §6.4.3）
-- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/exp.ts` + `kweaver-sdk/packages/typescript/src/trace-core/{exp-engine,exp-store}/`（CLI 实现）+ 用户侧的可移植实验文件夹（state 真源，不在仓库内）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace.ts`（按需拆 trace/exp.ts）+ `kweaver-sdk/packages/typescript/src/trace-ai/{exp-engine,exp-store}/`（CLI 实现）+ 用户侧的可移植实验文件夹（state 真源，不在仓库内）
 - **入口契约**（CLI 子命令）：
   - `kweaver trace exp run [folder] --mode=single-path` — 在指定文件夹（默认 cwd）抢 lock，读 mission.md 启动 / 续跑单路径迭代
   - `kweaver trace exp resume [folder]` — 等价语义，强调"续跑"语义；接续 events.jsonl 上次 FSM 阶段（与 run 同一代码路径，仅提示语区分）
@@ -983,9 +990,9 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
 
 - **阶段**：post-MVP 深度诊断增强。MVP-A 先用既有 trace 做规则 / 状态机 / schema signal 诊断；replay 需要 DA 支持历史上下文重跑、新 trace 标注与 diff 契约，成本更高。
 - **形态**：**CLI**（无 service；详见 §6.4.1）
-- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace/replay.ts` + `kweaver-sdk/packages/typescript/src/trace-core/replay/`（CLI 实现）
+- **路径**：`kweaver-sdk/packages/typescript/src/commands/trace.ts`（按需拆 trace/replay.ts）+ `kweaver-sdk/packages/typescript/src/trace-ai/replay/`（CLI 实现）
 - **入口契约**：
-  - `kweaver trace replay <trace_id> --trial <trial-spec> [--mode=strict|compare|explore]` — 用指定 Trial 重跑历史 trace
+  - `kweaver trace replay <conversation_id> --trial <trial-spec> [--mode=strict|compare|explore]` — 用指定 Trial 重跑历史 trace
   - `kweaver trace replay --experiment-id=<id> --query=<q> --trial=<spec>` — 等价的另一种定位方式
   - 输出：新 trace（由远端 DA 在 replay 时正常打 OTel，CLI 在 replay 请求里带 `replay_of=<原 trace_id>` attribute，DA 必须原样标进新 trace 的 root span）+ 与原 trace 的逐 span diff（写本地 yaml 或 stdout）
 - **内部要做的事**：
@@ -1009,19 +1016,19 @@ M8 Publish Registry 与 M9 Post-deploy Verify 不进入 MVP。MVP 的交接面�
 - **形态**：**git 化静态契约 + CLI 校验器**；周期 audit CI workflow 属 post-MVP（无 service、无 CronJob；详见 §6.4.1）
 - **路径**：
   - SSOT：`trace-ai/schema/v1/`（git 化静态契约）—— `trace.yaml`、`experiment.yaml`、`bundle.yaml`、`manifest.yaml`、`eval-set.yaml`
-  - CLI 校验器：`kweaver-sdk/packages/typescript/src/commands/trace/schema.ts` + `kweaver-sdk/packages/typescript/src/trace-core/schema/`
-  - schema mirror 副本：`kweaver-sdk/packages/typescript/src/trace-core/schema/v1/*.yaml`（CLI 自带，build 时打进 dist；维护者在 schema PR 里同步推送）
-  - 同步源 SHA 锁：`kweaver-sdk/packages/typescript/schema-mirrors.lock`（多源可扩展，CI lint 校验一致性）
-  - post-MVP 周期 audit workflow：`trace-ai/.github/workflows/schema-audit.yml`（每 1h 跑 `kweaver trace schema audit`，报告 commit 到 `trace-ai/schema-audit-reports/` 或开 issue）
+  - CLI 校验器：`kweaver-sdk/packages/typescript/src/commands/trace.ts`（按需拆 trace/schema.ts）+ `kweaver-sdk/packages/typescript/src/trace-ai/schema/`（MVP-B 起，与 SSOT 一起建）
+  - schema mirror 副本：`kweaver-sdk/packages/typescript/src/trace-ai/schema/v1/*.yaml`（MVP-B 落地；CLI 自带，build 时打进 dist；维护者在 schema PR 里同步推送）
+  - 同步源 SHA 锁：`kweaver-sdk/packages/typescript/schema-mirrors.lock`（多源可扩展，CI lint 校验一致性，MVP-B 起启用）
+  - post-MVP 周期 audit workflow：`trace-ai/.github/workflows/schema-audit.yml`（每 1h 跑 `kweaver trace schema audit`，报告 commit 到 `trace-ai/schema-audit-reports/` 或开 issue）。**架构假设待重审**：audit 子能力可能下沉为 M4 schema-rules pack + 既有 cross-trace synthesizer + git-track scan-summary 历史 + diff 脚本，无需独立 audit 引擎（详见 plan-traceai 2026-05-11 plan §3 change log 2026-05-12 行）
 - **入口契约**：
   - **schema 文件本身是 SSOT**：YAML / JSON Schema 格式、版本化、git-tracked；trace-ai 后端服务（M1 inline schema hook）直接同仓 import；CLI 通过 mirror 副本使用
-  - `kweaver trace schema validate <file>` — 开发者本地：单文件 ajv 校验
-  - post-MVP：`kweaver trace schema audit [--time-window=1h] [--sample=1000] [--out=]` — CI 周期调用：跨 span 不变量 / 漂移率 / L1/L2 准入率 抽样报告
-- **内部要做的事**：
-  - 必填字段清单（针对 L1/L2 准入）
-  - 字段别名兼容表（如 `session_id → agent.session.id`）
-  - 兼容窗口（每个 minor version 至少保留一个 minor 的并行期）
-  - 违反字段统一标 `partial_trace` + 触发 `schema_validation_failed` event（**inline 校验在 M1 otelcol 端完成**，不在 CLI；MVP-A CLI 只做单文件校验，post-MVP 周期 audit 再拿 inline 干不了的三件：跨 span 不变量 / 漂移率 / 准入率）
+  - **MVP-A**：zod 内联 schema 嵌在 `src/trace-ai/diagnose/schemas.ts`（`diagnosis-rule/v1` + `trace-diagnose-report/v1`）；`kweaver trace diagnose rules validate <rule.yaml>` 子命令校验诊断规则 yaml
+  - **MVP-B**：`kweaver trace schema validate <file>` — 开发者本地单文件 ajv 校验（与 SSOT YAML 一起建，M5 eval-set 是第一个真消费者）
+  - **post-MVP**：`kweaver trace schema audit [--time-window=1h] [--sample=1000] [--out=]` — CI 周期调用：跨 span 不变量 / 漂移率 / L1/L2 准入率 抽样报告（架构假设待重审）
+- **内部要做的事**（按阶段）：
+  - MVP-A 已落：`diagnosis-rule/v1` + `trace-diagnose-report/v1` zod schema + `scan-summary/v1` schema
+  - MVP-B 起：SSOT YAML 文件 + 必填字段清单（针对 L1/L2 准入）+ 字段别名兼容表（如 `session_id → agent.session.id`）+ 兼容窗口（每个 minor version 至少保留一个 minor 的并行期）
+  - 违反字段统一标 `partial_trace` + 触发 `schema_validation_failed` event（**inline 校验在 M1 otelcol 端完成**，不在 CLI；CLI 只做单文件校验，post-MVP 周期 audit 再拿 inline 干不了的三件：跨 span 不变量 / 漂移率 / 准入率）
 - **schema mirror 同步机制**：MVP 阶段走人工纪律——trace-ai 维护者改 `schema/v1/` 时在同 PR 里 cp 到 kweaver-sdk mirror 路径并 bump `schema-mirrors.lock` 中的 `synced-at-sha`；kweaver-sdk CI 跑 lint 校验"lock 中的 SHA 在 trace-ai 仓库存在 + mirror 文件 hash 与该 SHA 对应文件一致"；drift 立刻 CI 红。MVP 阶段不发独立 npm 包、不用 git submodule（schema 改动频率周/月级，人工 + lock + lint 已够）；未来 drift 频繁时再升级到自动化跨仓 PR。
 - **依赖**：M3（audit 抽样走 M3 读 trace）；trace-ai 后端服务（M1）直接同仓 import；CLI 子命令通过自带 mirror 副本使用；不依赖 K8s 集群
 
@@ -1194,14 +1201,14 @@ M8 Publish Registry 与 M9 Post-deploy Verify 不进入 MVP。MVP 的交接面�
 | `trace-ai/otelcol-contribute-chart/` | 保留 + 扩张为 M1，加 tail sampling / 大字段裁剪 / schema hook |
 | `trace-ai/agent-observability/migrations/{mariadb,dm8}/` | M3 自身需要的 RDB 迁移仍保留；不承接 M6 控制态（控制态在实验文件夹，见 §6.4.2） |
 | `trace-ai/agent-observability/docs/{prd,design}/` | 与本 spec 并行：一期 PRD/Design 仍是 L0 主路径；本 spec 是更上层的整体 vision |
-| README / CHANGELOG / VERSION | 升级为"持续学习中枢"叙事；明确"MVP-A 为 3 个 L0 服务 + 0 CronJob + `diagnose`/`schema validate`，MVP-B 补 `eval-set build/test`，MVP-C 补 `exp --mode=single-path`"的物理形态承诺 |
-| 新增：`trace-ai/schema/v1/*.yaml` | MX1 — Schema SSOT 静态契约（git 化，非 service）|
-| 新增：`trace-ai/.github/workflows/schema-audit.yml` | post-MVP：MX1 周期 audit 触发（每 1h 跑 `kweaver trace schema audit`，CI workflow 形态而非 K8s CronJob） |
+| README / CHANGELOG / VERSION | 升级为"持续学习中枢"叙事；明确"MVP-A 为 3 个 L0 服务 + 0 CronJob + `diagnose <conversation_id>` 单 trace + `diagnose --traces=` 批量；MVP-B 补 `eval-set build/test` + `schema validate` + SSOT YAML；MVP-C 补 `exp --mode=single-path`"的物理形态承诺 |
+| 新增（MVP-B 落地）：`trace-ai/schema/v1/*.yaml` | MX1 — Schema SSOT 静态契约（git 化，非 service）|
+| 新增（post-MVP）：`trace-ai/.github/workflows/schema-audit.yml` | post-MVP：MX1 周期 audit 触发（每 1h 跑 `kweaver trace schema audit`，CI workflow 形态而非 K8s CronJob）。**架构假设待重审**：可能下沉为 M4 schema-rules pack + cron 调用 `diagnose --traces=` |
 | 新增：`trace-ai/storage-templates/` | M2 索引模板 |
-| **不新增** `trace-ai/cli/` | MVP-A/B/C CLI 实现住 kweaver-sdk monorepo `packages/typescript/src/commands/trace/` + `src/trace-core/`；trace-ai 仓库不直接持有 above-L0 CLI 代码（除 schema mirror 同步靠维护者人工纪律） |
+| **不新增** `trace-ai/cli/` | MVP-A/B/C CLI 实现住 kweaver-sdk monorepo `packages/typescript/src/commands/trace.ts` + `src/trace-ai/` + `src/agent-providers/`；trace-ai 仓库不直接持有 above-L0 CLI 代码（除 schema mirror 同步靠维护者人工纪律） |
 | **不新增** `trace-ai/charts/{schema-guard,post-deploy-verify}/` | CronJob 形态在 MVP 中砍掉：MX1 audit 和 M9 verify 都不进 MVP-A/B/C |
 | **不再新增**：`trace-ai/{curation,eval-set-builder,experiment-engine,replay,publish-registry,post-deploy-verify}/` 各自独立 service 目录 | MVP-A/B/C 中 M4/M5/M6 退成 CLI 子命令 + 文件 artifact；M7/M8/M9 deferred；无独立 service 入口 |
-| 新增：kweaver-sdk monorepo `packages/typescript/src/{commands/trace,trace-core,api/trace,ui/trace}/` | trace-ai MVP-A/B/C above-L0 CLI 实现住 kweaver-sdk；详细模块布局见 `vision/trace-cli-detailed-design.md` |
+| 新增：kweaver-sdk monorepo `packages/typescript/src/{commands/trace.ts,trace-ai,agent-providers,api/trace,ui/trace}/` | trace-ai MVP-A/B/C above-L0 CLI 实现住 kweaver-sdk；详细模块布局见 `vision/trace-cli-detailed-design.md` 附录 A |
 | 用户侧（不在 trace-ai 仓库内） | diagnosis report、eval-set、test report、实验文件夹由 operator 各自管理；MVP-C 只要求本地文件可 review，是否纳入 git 由用户或外部平台决定；`outputs/` 由用户或外部发布平台自行保存 |
 
 ## 附录 B — 与既有 spec 的关系

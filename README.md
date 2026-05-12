@@ -49,8 +49,9 @@ plan-traceai/
 ## 当前阶段
 
 - **现状研究**：基本完成。READING_REPORT 已沉淀 v0.2.2 视角的能力清单、Schema 现状、痛点诊断
-- **未来设计**：Vision Spec 已出 Draft（2026-05-07），覆盖 L0+L1+L2 顶层形态、9 个章节齐备
-- **下一阶段**：从 vision-level 落到二级子模块 spec / MVP 选型
+- **未来设计**：Vision Spec 已出 Draft（2026-05-07），覆盖 L0+L1+L2 顶层形态、9 个章节齐备；2026-05-12 同步修订与 M4 实际落地对齐（详见 `plan/2026-05-11-m4-diagnose-issue-plan.md` §3 change log）
+- **MVP-A 已完成**（用户故事 A 验收）：`kweaver trace diagnose <conversation_id>` 单 trace + `--traces=<id-list>` 批量，输出诊断报告。**spec 字面承诺中两件件刻意推到 MVP-B**：B2 RemoteJobClient（M5 test runner 真消费者）+ `kweaver trace schema validate` 子命令（依赖 MX1 SSOT YAML 先建，M5 是第一个真消费者）
+- **下一阶段**：从 vision-level 落到二级子模块 spec / MVP 选型；候选见 `plan/2026-05-11-m4-diagnose-issue-plan.md` §"M4 之后"（M5 Eval-Set Builder / L1 Triage 选型 / Falsifiable Manifest 等）
 
 ## 核心概念速查
 
