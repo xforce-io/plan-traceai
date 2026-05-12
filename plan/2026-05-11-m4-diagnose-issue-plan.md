@@ -26,9 +26,9 @@
 
 | 字段 | 值 |
 |------|-----|
-| 状态 | 🟡 in progress |
-| Issue | [kweaver-ai/kweaver-sdk#120](https://github.com/kweaver-ai/kweaver-sdk/issues/120) |
-| PR | — / — （PR-A symbolic / PR-B agent + rubric + within-trace synthesizer） |
+| 状态 | ✅ done（2026-05-12） |
+| Issue | [kweaver-ai/kweaver-sdk#120](https://github.com/kweaver-ai/kweaver-sdk/issues/120)（CLOSED） |
+| PR | [#121](https://github.com/kweaver-ai/kweaver-sdk/pull/121) merged（PR-A symbolic）/ [#122](https://github.com/kweaver-ai/kweaver-sdk/pull/122) merged（PR-B agent + rubric + within-trace synthesizer） |
 | 估算 | 14-16d |
 
 **用户故事**：给定一条线上 trace 的 `trace_id`，跑：
@@ -112,8 +112,9 @@ PR-B（agent + rubric + 内部综合，6-8d，依赖 PR-A）：
 
 | 字段 | 值 |
 |------|-----|
-| 状态 | ⬜ pending |
-| PR | — |
+| 状态 | 🟡 待 PR merge（scope 已收敛：仅 batch 形态，scan 时间窗形态明确不做） |
+| Issue | [kweaver-ai/kweaver-sdk#123](https://github.com/kweaver-ai/kweaver-sdk/issues/123)（OPEN，待 PR merge 后 close） |
+| PR | [#124](https://github.com/kweaver-ai/kweaver-sdk/pull/124) OPEN — batch `--traces=<id-list>` + Stage-4 cross-trace synthesizer + Stage-1 gate + 单 agent 校验 + artifacts |
 | 估算 | 5-7d |
 
 **用户故事**：
@@ -123,15 +124,23 @@ PR-B（agent + rubric + 内部综合，6-8d，依赖 PR-A）：
 
 两种形态共用同一条 pipeline，差别仅在 trace 来源（streaming 拉取 vs 显式列表枚举）。两者都输出一个目录的诊断报告 + 一份 `scan-summary.yaml` 跨 trace 综合报告，内存稳定、可中断恢复。综合报告告诉用户"这段时间内最严重的失败模式是 X，受影响最重的 agent 是 Y，建议优先修 Z"——不是一坨 trace 报告罗列。
 
-**范围**：
+**范围**（✅ = PR #124 已 ship）：
 
-- B1 `searchTracesStream(query, page)` 流式分页拉取（scan 模式用）
-- `--traces=<id-list>` 解析 + 逐个 `getTrace` 拉取（batch 模式用，复用 PR-A 的 B1.getTrace）
-- scan / batch pipeline：Stage-1 symbolic 规则先跑（廉价，作为 triage gate）→ 命中再喂 Stage-2 rubric 规则（贵）→ Stage-3 within-trace 综合（每条 trace 一份）
-- **Stage-4 cross-trace 综合**（issue #2 新增）：`scan-synthesizer` 聚合 N 份 trace 报告 → `scan-summary.yaml`（rule 频次、agent 排名、模式聚类、top-K 改进建议）；agent 模式 + template fallback 同 within-trace synthesizer 一致
-- `--max-parallel` 并发控制
-- batch payload `{shared_context, per_trace_overlay[]}` dedup（多 trace 同送 agent 时去重共享上下文）
+- ✅ `--traces=<id-list>` 解析 + 逐个 `getTrace` 拉取（batch 模式用，复用 PR-A 的 B1.getTrace）；支持 `--traces=@/path/to/file`
+- ✅ batch pipeline：Stage-1 symbolic 规则先跑（廉价，作为 triage gate，rubric `gates_on` 字段）→ 命中再喂 Stage-2 rubric 规则（贵）→ Stage-3 within-trace 综合（每条 trace 一份）
+- ✅ **Stage-4 cross-trace 综合**：`cross-trace-synthesizer.ts` 聚合 N 份 trace 报告 → `scan-summary.yaml`（rule 频次、agent 排名、改进建议）；LLM 失败时回退到 deterministic 聚合摘要（`fallbackSummary`）
+- ✅ `--max-parallel` 并发控制（[1, 64] 校验，避免 0 / 负数 死循环）
+- ✅ 单 agent 校验：所有 traces 必须属于同一 agent，否则 fail-fast
+- ✅ Artifacts 持久化（默认开，`--no-artifacts` 可关）；per-trace yaml/md 写入 `<out>/traces/` 子目录
+
+**明确不做**（2026-05-12 收敛，scan 能力本期到此为止）：
+
+- B1 `searchTracesStream(query, page)` 流式分页
+- `kweaver trace diagnose scan --time-range=24h --tenant=<...>` 时间窗形态
+- batch payload `{shared_context, per_trace_overlay[]}` dedup
 - 输出去重（按 `trace_id + rule_id`）
+
+—— 理由：batch (`--traces=`) 形态已能覆盖手头攥着 conv_id 列表的实战场景；时间窗扫描需要先确认后端 `_search` 分页 + 租户过滤契约，且当前没有强需求驱动；payload dedup / 输出去重在量级上来之前是过度优化。如未来出现真实场景再开新 issue。
 
 **验收**：
 
@@ -153,6 +162,9 @@ PR-B（agent + rubric + 内部综合，6-8d，依赖 PR-A）：
 | 2026-05-11 | 加 Stage-3 within-trace synthesizer 到 #1（spec + plan + issue），#2 scope 增加 Stage-4 cross-trace synthesizer。#1 估算 12-14d → 14-16d；#2 估算 3-4d → 5-7d | 用户 challenge "只见树木不见森林"——单 trace 的 N findings 是局部，需要 forest view。within-trace synthesizer 处理"一份报告里多条 finding 的去重串联"；cross-trace synthesizer（scan）处理"100+ trace 的模式聚合 + 排名 + 优先级"。架构上是 agent-providers/ 公共层的第二个 binding，和 agent-binding.ts 平级 |
 | 2026-05-12 | 把 vision §3.1 L383 的 `diagnose --traces=<id-list>` 显式 ID 列表形态对齐回 issue #2 范围 | 之前 3→2 重切时把 "batch (`--traces=`)" 隐式吞进了 scan 描述，留下三个文档口径不一致；用户 challenge 后追加：scan（时间窗）和 batch（显式列表）作为同一 pipeline 的两个入口，一并在 #2 落地 |
 | 2026-05-12 | 把 `trace-core/` 容器拆成两个对等顶层目录：`agent-providers/`（peer of `api/`）+ `trace-ai/`（peer of `bkn / dataflow / vega`，目前内含 `diagnose/`） | 用户 challenge: trace-core 这个"-core"命名让 trace-ai 看起来跟其他业务模块不对等，且把 `agent/`（跨模块基础设施，未来 M6 / Triage 也要用）埋在 trace-ai 内部一层。趁 PR-B 还没 merge、只有一个 consumer，做最小成本的目录重整。机械替换 + 全 suite 1103/1103 验证 |
+| 2026-05-12 | **Issue #1 完成**：PR-A [#121](https://github.com/kweaver-ai/kweaver-sdk/pull/121) + PR-B [#122](https://github.com/kweaver-ai/kweaver-sdk/pull/122) 双双 merged，issue [#120](https://github.com/kweaver-ai/kweaver-sdk/issues/120) closed | M4 双 pillar 完整版（symbolic + rubric + within-trace synthesizer）落地 |
+| 2026-05-12 | **Issue #2 切分实施**：先发 PR [#124](https://github.com/kweaver-ai/kweaver-sdk/pull/124) 仅覆盖 batch (`--traces=<id-list>`) 形态 + Stage-4 cross-trace synthesizer + Stage-1 gate + 单 agent 校验 + artifacts；scan 时间窗形态（`scan --time-range=24h --tenant=`）+ B1 `searchTracesStream` + payload dedup + 输出去重 推后到 follow-up issue/PR | batch 形态优先级更高（手头攥着一组 conv_id 的实战场景），且不依赖后端 streaming 查询接口；scan 时间窗需要先确认 `_search` 分页 + 租户过滤的后端契约。CI 全绿（Python pass / TypeScript pass） |
+| 2026-05-12 | **Scope 终态收敛**：scan 能力本期止于 PR #124 的 batch 形态。时间窗 / streaming / payload dedup / 输出去重 从"follow-up TODO"改判为"明确不做"，列入 §2 #2 的"明确不做"块。如未来出现真实场景再开新 issue | 用户决定：当前没有时间窗扫描的强需求驱动；避免在 vision 落地阶段过度铺基础设施。M4 整体收尾在 PR #124 merge |
 
 ## 4. 跨 issue 共用资产
 
@@ -163,12 +175,24 @@ PR-B（agent + rubric + 内部综合，6-8d，依赖 PR-A）：
 
 ## 5. 下一步
 
-issue #1 启动时的动作：
+### Issue #1 — ✅ 完成（保留作历史参考）
 
-1. ✅ 探现状（已完成；见 brainstorming 记录）
+1. ✅ 探现状
 2. ✅ brainstorming 收敛所有关键设计决定
-3. 🟡 写正式 spec：`kweaver-sdk/docs/superpowers/specs/2026-05-11-m4-diagnose-issue1.md`
-4. ⬜ spec self-review + 用户 review
-5. ⬜ `writing-plans` 出 implementation plan，落到 `kweaver-sdk/docs/superpowers/plans/`
-6. ⬜ 在 kweaver-sdk 仓库开 worktree / 分支实现（PR-A → PR-B）
-7. ⬜ 完成后回本文件勾掉 + 填 PR + 写复盘
+3. ✅ spec
+4. ✅ implementation plan
+5. ✅ PR-A [#121](https://github.com/kweaver-ai/kweaver-sdk/pull/121) merged
+6. ✅ PR-B [#122](https://github.com/kweaver-ai/kweaver-sdk/pull/122) merged
+7. ⬜ 复盘（待补，建议在 issue #2 收尾时一起回顾）
+
+### Issue #2 — 🟡 待 PR merge 收尾
+
+1. 🟡 PR [#124](https://github.com/kweaver-ai/kweaver-sdk/pull/124) review + merge — batch (`--traces=`) 形态 + Stage-4 cross-trace synthesizer。CI 已绿。
+2. ⬜ PR #124 merge 后 close issue [#123](https://github.com/kweaver-ai/kweaver-sdk/issues/123)（连同"scan 时间窗形态本期不做"的备注）
+3. ⬜ 在本文件 §3 加 1 行 M4 整体收尾复盘
+
+—— scan 时间窗 / streaming / payload dedup / 输出去重 已在 §2 #2 的"明确不做"块中记录，本期不再追加 issue。
+
+### M4 之后
+
+M4 diagnose 收尾后，按 vision spec / `~/lab/plan-traceai/README.md` §"活清单"挑下一个 milestone（候选：M6 Synthesizer / Schema 治理 / L1 Triage MVP 选型 / Falsifiable Manifest）。
