@@ -6,6 +6,16 @@ date: 2026-05-09
 覆盖: MVP-A 轨迹诊断、MVP-B eval-set 构建与测试、MVP-C 单路径迭代、post-MVP 多路径/飞轮能力的取舍
 ---
 
+> **目录布局更新（2026-05-12，PR-B 内重构）**：本文档原先把 trace-ai 的所有内核组件都画在 `src/trace-core/` 下（见 §1 / §2 / §附录 A）。实际落地（M4 diagnose 部分）时拆成两个顶层对等目录：
+> - **`src/agent-providers/`** — peer of `src/api/`，存放 `AgentProvider` 抽象 / `claude-code-subprocess` provider / stub provider / prompt template。供 M4 diagnose、M6 Synthesizer、未来 Triage 共用。
+> - **`src/trace-ai/`** — peer of `bkn / dataflow / vega`，trace-ai 业务模块根，目前内含 `diagnose/`；M5 eval-set / M6 exp-engine / M7 replay 等未来子模块作为兄弟目录。
+>
+> 原 `src/trace-core/` 容器废弃。本文档下文 §1 / §2 / §附录 A 里凡是 `src/trace-core/X/` 的引用，按以下规则迁移：
+> - `src/trace-core/agent/` → `src/agent-providers/`
+> - `src/trace-core/<其它子模块>/` → `src/trace-ai/<同名子模块>/`（diagnose / eval-set / exp-store / exp-engine / replay / schema / remote-job / git-checkpoint 等）
+>
+> 原因：用户 challenge "trace-ai 跟 bkn / vega 是 peer 模块，trace-core 命名让它看起来特殊"。重构在 PR-B feature 分支内做，只有一个 consumer。原文未做逐字修订，避免对未实现的 M5-M9 子模块做 revisionist 改写。
+
 ## §0 范围与背景
 
 vision §6.4 / §7 把 trace-ai above-L0 的能力划成 M4 Curation / M5 Eval-Set Builder / M6 Experiment Engine / M7 Replay / M8 Publish Registry / M9 Post-deploy Verify / MX1 Schema。本文档按用户价值路径重切 MVP：MVP-A 先做轨迹诊断，帮助用户识别 Decision Agent 这个"概率性程序"哪里写得不合理；MVP-B 再把诊断沉淀为 eval-set 并跑测试；MVP-C 支持沿一个方向做单路径持续迭代。多路径探索、Trial Forest、自动飞轮、M7 replay、M5 relabel、MX1 audit、M8/M9 均放到 post-MVP。
