@@ -87,8 +87,8 @@ kweaver trace eval-set build --diagnosis=diagnosis/latest/ --out=eval-sets/custo
 kweaver trace schema validate eval-sets/customer-support-v1/index.yaml --kind=eval-set-index
 
 # 3. 用当前 agent 配置跑一次测试，生成 baseline test report
-kweaver trace eval-set test eval-sets/customer-support-v1 --candidate=<...> --out=test-runs/baseline/
-#                                                                         ^ candidate 字面值占位化，MVP-B brainstorm 决定（见 §3.2）
+kweaver trace eval-set test eval-sets/customer-support-v1 --candidate=agt_42@v3 --out=test-runs/baseline/
+#                                                                     ^ 2026-05-13 修订：裸标识 <agent_id>[@<version>]，不读 yaml；详 §3.2
 ```
 
 Story B 主要落在 M5 Eval-Set Builder：构造 eval-set、脱敏、schema 校验、调用远端 DA / evaluator 跑测试。它仍不需要 M6 Experiment Engine，也不做多候选优化。
@@ -509,11 +509,11 @@ rulesets:
 ```
 kweaver trace eval-set build   [--diagnosis=<path>] [--queries=<path>] --out=<dir>                     # MVP-B
                                [--on-conflict=fail|skip|overwrite]                                     #   query_id 冲突策略，default=fail
-kweaver trace eval-set test    <eval-set-dir> --candidate=<...> [--out=<dir>] [--max-parallel=<n>]     # MVP-B
+kweaver trace eval-set test    <eval-set-dir> --candidate=<agent_id>[@<version>] [--out=<dir>] [--max-parallel=<n>]     # MVP-B
 kweaver trace eval-set relabel <eval-set-dir> [--sync] [--force]                                       # post-MVP
 ```
 
-> **`--candidate=<...>` 形态待定**：spec 占位化。MVP-B brainstorm 时决定具体字面值（候选两种：`agent_id[@version]` 裸标识 vs 本地 yaml 文件含 agent_id + 未来 overrides 字段）。platform 现实只支持 `agent_id` 寻址，DA 不提供 agent 配置 export。
+> **`--candidate=<agent_id>[@<version>]` 裸标识形态**（2026-05-13 修订，去占位化）：MVP-B brainstorm 决议（D3）—— platform 现实只支持 `agent_id` 寻址，DA 不提供 agent 配置 export。CLI 直接把 agent_id（+ 可选 version）拼进 `chat/completion` request 的 path / body 字段。不引入 candidate yaml 文件抽象；候选 yaml 形态留给 M6 mission.md 的 `current_candidate` 真有 file-based 需求时再设计。
 
 > **`--with-reference` flag 砍掉**（2026-05-12 修订）：spec 原版要求 build 时"从历史 trace 提取成功标准输出"作为 reference。重审后砍掉，理由：(a) "成功"定义不可靠 (b) 失败 case 没有成功对照体 (c) 真正"从失败 trace 反推应有行为"是 L2 hindsight relabel 的领域（post-MVP）。MVP-B 期 reference 由 SME 手写或留空（用 assertions 兜底）。
 
@@ -548,7 +548,7 @@ src/trace-ai/eval-set/
    |----------|----------|-----------|----------|
    | 已知答案的金标准 | 直接放完整 yaml 到 `<repo>/eval-sets/<name>/` | `trace-eval-set/v1` 完整 shard（带 reference / assertions） | `kweaver trace schema validate` 校验后即可被 `test` / `exp` 吃，**不走 build** |
    | 从诊断报告自动 lift | `eval-set build --diagnosis=<dir>` | 无需手写 | 读 M4 报告 `verify_with.suggested_eval_case` → 生成 shard |
-   | 从 ticket / 日志摘一批 query | `eval-set build --queries=<file>.yaml` | `trace-eval-set-input/v1`（简化格式：只 `cases[].input` + 可选 `query_id` / `tags`） | 补 query_id + 跑 redaction + 留 `reference: null` / `assertions: []` 占位 → 生成 shard |
+   | 从 ticket / 日志摘一批 query | `eval-set build --queries=<file>.yaml` | `trace-eval-set-input/v1`（简化格式：`cases[].input` 必填 + 可选 `query_id` / `tags` / **`reference` / `assertions`**） | 补 query_id + 跑 redaction + lift 用户填的 reference / assertions（**不留占位**）→ 生成 shard。用户都不填 → schema 校验 fail-fast |
 
 2. `build` 是无状态的纯函数——输入 (diagnosis report 或 queries 简化 yaml) → 输出 yaml 集合。`--diagnosis=` 读取 M4 报告的 `verify_with.suggested_eval_case` 段直接生成 shard，无需用户在 diagnosis 与 eval-set 之间手工搬数据。
 3. `test` 是 MVP-B 的闭环验证：只跑一个 candidate，不比较多个候选，不生成优化建议。**实现上是 sync sequential pipeline**——对每条 case 调既有 `chat/completion` 拿 answer + `conversation_id`，按 assertions 需要拉 trace 后本地评估，并发由 `--max-parallel` 控制（[1, 64]，默认 1）。**2026-05-13 修订**：原 spec 说 "M6 single-path executor 的薄包装"，落地时发现 (a) M6 executor 尚未存在；(b) kweaver 平台 DA 后端无 async job 接口、无独立 evaluator 服务；(c) 6 种 assertion 全部本地可算。改为独立 sync pipeline，MVP-C M6 真做时按需复用 / 重组件。
@@ -605,21 +605,38 @@ cases:
     tags: ["refund"]
 ```
 
-`--queries=<path>` 简化格式（**`trace-eval-set-input/v1`**，仅 build 命令吃，CLI 内部 lift 到 `trace-eval-set/v1`）：
+`--queries=<path>` 简化格式（**`trace-eval-set-input/v1`**，仅 build 命令吃，CLI 内部 lift 到 `trace-eval-set/v1`；**2026-05-13 修订 D1：加可选 `reference` / `assertions`**）：
 
 ```yaml
 schema_version: trace-eval-set-input/v1
 cases:
+  # 场景 1：query + golden answer（推荐：用 semantic_match 兜）
   - input:                          # 必填
       user_message: "如何申请退款？"
     query_id: refund_001            # 可选，省略时 CLI 用 hash(input + tags) 自动生成
     tags: ["refund"]                # 可选
+    reference:                      # 可选
+      answer: "请在订单详情页点击申请退款。"
+    assertions:                     # 可选
+      - type: semantic_match
+        rubric_template_ref: builtin:answer-match-reference
+
+  # 场景 2：query + 显式 assertions（不要 reference）
   - input:
-      user_message: "订单 123 物流到哪了？"
-    tags: ["shipping"]
+      user_message: "查询账户余额"
+    assertions:
+      - type: tool_call_count
+        tool: balance_query
+        op: gte
+        n: 1
+    tags: ["account"]
+
+  # 场景 3：纯 query 无 reference 无 assertions
+  # → schema 校验 fail-fast（refinement：reference 空时 assertions 必须非空）
+  # → 用户必须至少补一个，CLI 不再自动留占位
 ```
 
-CLI lift 规则：`schema_version: trace-eval-set-input/v1` → `trace-eval-set/v1` + 补 `reference: null` + 补 `assertions: []`（用户后续手工补齐 assertions 或走 post-MVP relabel）。**输入 schema 单独命名是避免用户错写"完整 shard 但留空必填字段"的 footgun**——zod 在两种 schema 之间能给清晰的错误定位。
+CLI lift 规则：`schema_version: trace-eval-set-input/v1` → `trace-eval-set/v1`，**字段透传**（用户填的 reference / assertions 原样保留，不填则在 lift 后的 shard 里保持 unset，触发 refinement fail）。**输入 schema 单独命名**保留：避免用户错写"完整 shard 但留空必填字段"的 footgun；zod 在两种 schema 之间能给清晰的错误定位。**2026-05-13 修订**：原 spec 写 "lift 时自动补 reference: null + assertions: []" 违反 refinement，修复为字段透传 + 强制用户至少填一个。
 
 **assertions 类型枚举（MVP-B 起手 6 种，post-MVP relabel 再加偏好对类）**：
 
@@ -642,7 +659,7 @@ CLI lift 规则：`schema_version: trace-eval-set-input/v1` → `trace-eval-set/
 1. **源数据圈选**：
    - 互斥：`--diagnosis=<dir>` 或 `--queries=<file>` 至少且只能一个（fail-fast）。
    - `--diagnosis=<dir>`：`query-picker.ts` 读 M4 报告的 `verify_with.suggested_eval_case` 段，lift 出 input + 可选 reference + assertions 模板。
-   - `--queries=<file>`：`query-picker.ts` 按 `trace-eval-set-input/v1` schema 读，留 `reference: null` / `assertions: []` 占位，要求用户后续手工补齐或走 post-MVP relabel。
+   - `--queries=<file>`：`query-picker.ts` 按 `trace-eval-set-input/v1` schema 读（含可选 reference / assertions），lift 时字段透传到 `trace-eval-set/v1`；用户都不填 → schema refinement fail-fast 提示补一个。
 2. **query_id 补齐**：
    - 用户已填 `query_id` → 原样保留。
    - 未填 → CLI 用 `hash(canonical_json(input) + tags)` 截前 12 hex 自动生成（同输入幂等）。

@@ -947,7 +947,7 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
   - `eval-set build --queries=<file>` 从 `trace-eval-set-input/v1` 简化格式（只有 input + 可选 query_id / tags）lift，留 reference / assertions 占位
 - **入口契约**：
   - `kweaver trace eval-set build [--diagnosis=<path> | --queries=<path>] --out=<dir> [--on-conflict=fail|skip|overwrite]` — 两个 source flag 互斥；query_id 冲突默认 fail-fast
-  - `kweaver trace eval-set test <eval-set-dir> --candidate=<...> [--out=<dir>] [--max-parallel=<n>]` — 用当前 agent 配置跑 baseline test report；`--candidate` 字面值占位化（MVP-B brainstorm 决定 `agent_id[@version]` 裸标识 vs yaml 文件形态）
+  - `kweaver trace eval-set test <eval-set-dir> --candidate=<agent_id>[@<version>] [--out=<dir>] [--max-parallel=<n>]` — 用当前 agent 配置跑 baseline test report；裸标识形态（2026-05-13 修订 D3：去占位化，platform 现实只支持 agent_id 寻址；候选 yaml 形态留给 M6 mission.md）
   - post-MVP：`kweaver trace eval-set relabel <eval-set-dir> [--sync] [--force]` — hindsight relabel（LLM 在此启用），把 latent failure 重写为偏好对；正式路径走 async submit + poll，`--sync` 是 dev / debug 降级；默认要求目标文件 clean，`--force` 仅用于本地调试
   - **版本化即 git 版本**：不需要独立 GET /eval-sets/{id}，git checkout / blame 即取
 - **内部要做的事**：
@@ -955,7 +955,10 @@ driver 离线时已发出去的 trial 在远端继续跑，driver resume 时按 
   - 单 candidate baseline test：只确认问题可复现，不做多候选优化
   - reference 可选：reference 为空时 assertions[] 必须非空（zod refinement 强制）
   - assertions 类型 MVP-B 枚举：`contains` / `not_contains` / `regex` / `tool_call_count` / `tool_call_order` / `semantic_match`（走 `agent-providers/`） / `latency_ms`
+  - **builtin rubric template `answer-match-reference`**（2026-05-13 修订 D5）：MVP-B 必 ship 至少一条 builtin rubric template，judge "answer 是否与 reference 语义等价"；输出 schema 归 rubric template 自己（旁挂 `.json`），不进 B5 注册表。这是 golden truth 路径的核心 assertion——用户在 `--queries=` 输入里填 reference 后默认走它
+  - **`--queries=<file>` 简化输入加可选 reference / assertions**（2026-05-13 修订 D1）：与 final shard 同 refinement（reference 空时 assertions 必须非空）；build lift 时字段透传，不留占位；用户都不填则 schema 校验 fail-fast。原 spec 写 "自动补 reference: null + assertions: []" 违反 refinement，本次修订修复
   - **`test` 实际实现**（2026-05-13 修订）：sync sequential pipeline——对每条 case 调 kweaver-sdk 既有 `POST /api/agent-factory/v1/app/{agent_id}/chat/completion`（sync streaming）拿 `answer` + `conversation_id`；按 assertions 类型决定是否拉 trace（`/traces/by-conversation`）；本地评估 6 种 assertion；并发由 `--max-parallel` 控制（[1, 64]，默认 1）。**不走 async submit + poll**——kweaver 平台后端不存在 async job 系统、不存在独立 evaluator 服务，所有 assertion 类型本地可算
+  - **redaction 默认行为**（2026-05-13 修订 D2）：内置 5-8 条低保真 PII patterns（电话/邮箱/身份证/银行卡/IP）+ 覆盖链 `--redaction-rules > <repo>/redaction-rules/ > builtin`；输出标 `redaction_rules=<source>`；规则正则异常 fail-fast 不静默 fallback
   - **不做**：`--with-reference` flag 砍掉——"从历史 trace 提取成功标准输出"这件事属于 L2 hindsight relabel，放 post-MVP；MVP-B 期 reference 由 SME 手写或留空
   - post-MVP：Hindsight relabel，把 latent failure 的"原行为 vs 应有行为"沉淀为偏好对
   - eval set 版本化：直接 git 化、可 diff、可 PR review
