@@ -24,6 +24,8 @@ MVP-C 实现 `kweaver trace exp` 命令族，让用户沿单条修改路径（ba
 - GitCheckpointDriver（自动 git commit）
 - `exp watch / list` 命令
 - decision-agent provider 实现（MVP-C 只有 claude-code + provider 接口 stub）
+- Dolphin DSL patch（DSL 结构待专项研究）
+- BKN patch（平台 API 写操作，需 rollback 设计）
 - 分布式锁
 
 ---
@@ -279,11 +281,37 @@ current_candidate:
   path: candidates/baseline.yaml
 
 next_change:                            # Synthesizer 覆写此字段
-  target: decision_agent.prompt
+  target: agent.system_prompt           # 见下方"迭代目标类型"
   hypothesis: "加 stop condition"
   patch: |
     ...
 ```
+
+### 迭代目标类型（PatchApplier 类型派发）
+
+MVP-C 的 `next_change.target` 限定为以下两类，PatchApplier 按 target 前缀派发到对应 handler：
+
+| 类型 | target 前缀 | target 示例 | patch 语义 | MVP-C |
+|------|------------|------------|-----------|-------|
+| **Agent Config** | `agent.*` | `agent.system_prompt` / `agent.temperature` / `agent.model` | 本地 candidate YAML 字段替换/追加 | ✅ AgentConfigPatcher |
+| **Skill** | `skill.*` | `skill.add` / `skill.remove` / `skill.swap` | 本地 candidate YAML 的 skills 列表修改 | ✅ SkillPatcher |
+| Dolphin DSL | `agent.dsl.*` | `agent.dsl.flow` | DSL 结构未研究清楚，需专项设计 | post-MVP stub |
+| BKN | `bkn.*` | `bkn.entity.stop_rule` | 平台 API 写操作，需 rollback 设计 | post-MVP stub |
+
+**candidate YAML 结构（MVP-C 范围）：**
+```yaml
+candidate_version: v1
+agent:
+  model: claude-sonnet-4-6
+  temperature: 0.3
+  system_prompt: |
+    ...
+skills:
+  - name: retrieval_v1
+  - name: summarize_v2
+```
+
+PatchApplier 读取当前 candidate YAML，应用 next_change.patch（JSON Merge Patch 语义），写出 `candidates/candidate-v{N}.yaml`。
 
 ---
 
@@ -373,8 +401,14 @@ src/trace-ai/exp/
     abort-signal.ts
     readme-template.ts      # README.md 模板渲染
   providers/
-    synthesizer-client.ts   # SynthesizerClient 接口 + 两个 provider 实现
-    triage-client.ts        # TriageClient 接口 + 两个 provider 实现
+    synthesizer-client.ts   # SynthesizerClient 接口 + claude-code 实现（DA stub）
+    triage-client.ts        # TriageClient 接口 + claude-code 实现（DA stub）
+  patch/
+    index.ts                # PatchApplier 类型派发入口
+    agent-config.ts         # AgentConfigPatcher（agent.* target）
+    skill.ts                # SkillPatcher（skill.* target）
+    dsl-stub.ts             # Dolphin DSL stub（post-MVP）
+    bkn-stub.ts             # BKN stub（post-MVP）
   eval-runner.ts            # 包装 MVP-B eval-set test
   bundle-writer.ts          # BundleWriter
   schemas.ts                # B5 扩展：trace-mission/v1, trace-bundle/v1, trace-manifest/v1
