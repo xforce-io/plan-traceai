@@ -178,29 +178,51 @@ Init（exp run 触发）
       │
       ▼ round = 1
 Generating
-  SynthesizerClient.generate(mission, prev_round?)
+  输入（四层）：
+    - mission.md: goal / hypothesis / guardrails
+    - current_candidate: prompt / skill binding / BKN 配置（快照）
+    - prev_round: {triage_conclusion.hints, scores}（首轮为空）
+    - cross_round_memory_ref: 上轮 memory token（首轮为空）
+
+  SynthesizerClient.generate(上述四层)
   → next_change: {target, hypothesis, patch}
-  → writeSuggestedChange()  覆写 mission.md
+  → writeSuggestedChange()  覆写 mission.md 的 next_change 字段
   → appendLineage(candidate_snapshot)
       │
       ▼
 Executing
   EvalRunner.run(eval_sets, candidate)
   复用 MVP-B eval-set test 流程
-  → per-query execution results + raw scores
+  每条 query 执行后：
+    - 收集 kweaver trace（原始 span 仅本地存档）
+    - 提取轨迹摘要：tool_call_sequence / retry_count / latency_ms / error_codes
+  → per-query: {assertion_results, trajectory_summary, raw_trace_id}
       │
       ▼
 Scoring
-  本地计算三轴分数（Outcome / Trajectory / Guardrail）
+  四层输入 → 三轴分数：
+
+  输入层：
+    [轨迹摘要]  tool_call_sequence / retry_count / latency_ms   → Trajectory 轴
+    [断言结果]  assertion_results (contains/regex/semantic…)    → Outcome 轴
+    [候选配置]  当前 candidate prompt / skill / BKN 快照        → Guardrail 轴检查
+    [声明不变量] mission.md guardrails 字段                     → Guardrail hard gate
+
   Guardrail hard gate 违反 → 本轮 Trial 不写入 lineage，
     writeRound(n, {guardrail_failed: true, scores})，跳 Deciding（用户可修改 candidate 再 resume）
-  正常 → writeRound(n, {scores, per_query_results})
+  正常 → writeRound(n, {scores, per_query_results, trajectory_summaries})
       │
       ▼
 Triaging
-  TriageClient.triage(round_n_scores, prev_rounds)
-  → {diagnoses, hints, verdict: continue | publish}
-  → writeRound(n, {triage_conclusion})
+  输入（四层）：
+    - round_n: {scores, per_query_results, trajectory_summaries}
+    - prev_rounds: [{scores, triage_conclusion}]（历史轮摘要，不含原始 trace）
+    - candidate_config: 当前 prompt / skill / BKN 快照
+    - cross_round_memory_ref: 上轮 Triage 返回的 memory token（首轮为空）
+
+  TriageClient.triage(上述四层)
+  → {diagnoses, hints, verdict: continue | publish, new_memory_token}
+  → writeRound(n, {triage_conclusion, cross_round_memory_ref: new_memory_token})
       │
       ▼
 Deciding
@@ -219,6 +241,17 @@ Publishing
 ```
 
 **abort 检测**：每个状态开始前 `isAborted()` 检查一次，若 abort.signal 存在则立即退出并写 `{type:"aborted"}` 事件。
+
+### 分析与迭代的信息层汇总
+
+| 信息层 | 来源 | 用于 | 备注 |
+|--------|------|------|------|
+| **执行轨迹摘要** | EvalRunner 从 kweaver trace 提取 | Trajectory 轴打分 / Triage 诊断 | 原始 span 仅本地存档，不传 LLM |
+| **断言结果** | eval-set assertion 本地计算 | Outcome 轴打分 / Triage 诊断 | 结构化，token 成本低 |
+| **候选配置快照** | candidate YAML（prompt / skill / BKN） | Synthesizer 生成 patch / Guardrail 检查 | 每轮写入 lineage |
+| **跨轮记忆 token** | 上轮 Triage 返回 new_memory_token | Synthesizer + Triage 跨轮上下文 | 避免重复探索同一方向 |
+| **历史轮摘要** | rounds/round-N.yaml（scores + hints） | Triage 趋势判断 | 不含原始 trace，仅聚合分数 |
+| **mission.md** | 用户编写 | goal / guardrails / next_change 建议 | Synthesizer 覆写 next_change 字段 |
 
 ---
 
