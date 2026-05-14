@@ -14,7 +14,7 @@ MVP-C 实现 `kweaver trace exp` 命令族，让用户沿单条修改路径（ba
 - `exp run / resume / show / status / abort / doctor` 六条命令
 - FSM 驱动的单路径迭代循环（7 状态）
 - ExpStore（B3）：实验文件夹 + lockfile 协议 + 状态文件管理
-- Synthesizer（生成 next_change）和 Triage（诊断 round 结果）双 provider 支持
+- Synthesizer（生成 next_change）和 Triage（诊断 round 结果）provider 接口（MVP-C 仅 ship claude-code）
 - EvalRunner 复用 MVP-B eval-set test 流程
 - 三轴打分（Outcome / Trajectory / Guardrail）
 - 实验目录 README 自动生成
@@ -23,7 +23,7 @@ MVP-C 实现 `kweaver trace exp` 命令族，让用户沿单条修改路径（ba
 - Trial Forest / 多路径并行
 - GitCheckpointDriver（自动 git commit）
 - `exp watch / list` 命令
-- 真实 DA 接口的 E2E 测试
+- decision-agent provider 实现（MVP-C 只有 claude-code + provider 接口 stub）
 - 分布式锁
 
 ---
@@ -59,10 +59,10 @@ Init → Generating → Executing → Scoring → Triaging → Deciding → Publ
 | 状态 | 入口命令 | 说明 |
 |------|---------|------|
 | Init | `exp run`（冷启） | acquireLock → initDir → replayState |
-| Generating | `exp run`（新轮）/ `exp resume` | SynthesizerClient 生成 next_change |
-| Executing | 自动 | EvalRunner 跑 eval-set |
+| Generating | `exp resume` / 自动 | PatchApplier 应用 next_change → candidate-vN |
+| Executing | 自动 | EvalRunner 跑 eval-set，收集轨迹摘要 |
 | Scoring | 自动 | 本地计算三轴分数 |
-| Triaging | 自动 | TriageClient 诊断 round 结果 |
+| Triaging | 自动 | TriageClient 诊断 + SynthesizerClient 生成下一轮建议 |
 | Deciding | 自动 | 暂停等用户决策；verdict=publish 或达到 max_rounds 则跳 Publishing |
 | Publishing | `exp resume`（最终轮）/ verdict 自动触发 | BundleWriter 写出产物 |
 
@@ -71,10 +71,10 @@ Init → Generating → Executing → Scoring → Triaging → Deciding → Publ
 ```yaml
 # ~/.kweaver/config.yaml（全局默认）
 exp:
-  default_provider: claude-code   # claude-code | decision-agent
+  default_provider: claude-code   # MVP-C 仅支持 claude-code；decision-agent 为 post-MVP
 
-# mission.md（覆盖全局）
-provider: decision-agent
+# mission.md（覆盖全局，post-MVP 生效）
+# provider: decision-agent
 ```
 
 ---
@@ -173,64 +173,72 @@ exp doctor .        — 环境自检
 ```
 Init（exp run 触发）
   acquireLock() → replayState()
-  若 events.jsonl 存在且状态非终态（non Published/Aborted）→ 报错退出，提示用户用 exp resume
-  若终态或空 → initDir() → 清空 .trace-state/ → 重新开始
+  若 events.jsonl 存在且状态非终态（non Published/Aborted）
+    → 报错退出，提示用户用 exp resume
+  若终态（Published/Aborted）
+    → 拒绝覆盖，提示用 --new-run 另起实验
+      --new-run：将 .trace-state/ 归档为 .trace-state-archived-<timestamp>/，再重新开始
+  若空（全新实验）
+    → initDir()，创建目录骨架 + README.md
       │
       ▼ round = 1
-Generating
-  输入（四层）：
-    - mission.md: goal / hypothesis / guardrails
-    - current_candidate: prompt / skill binding / BKN 配置（快照）
-    - prev_round: {triage_conclusion.hints, scores}（首轮为空）
-    - cross_round_memory_ref: 上轮 memory token（首轮为空）
 
-  SynthesizerClient.generate(上述四层)
-  → next_change: {target, hypothesis, patch}
-  → writeSuggestedChange()  覆写 mission.md 的 next_change 字段
-  → appendLineage(candidate_snapshot)
+────────────────── 每轮起点（exp resume 进入此处）──────────────────
+
+Generating（Apply Phase）
+  读 mission.md.next_change（首轮：用户手写；后续轮：上轮 Synthesizer 写入）
+  PatchApplier.apply(current_candidate, next_change.patch)
+    → 写出 candidates/candidate-v{N}.yaml
+    → 更新 current_candidate 指针
+  appendLineage({version: N, candidate_path, next_change, status: "running"})
       │
       ▼
 Executing
-  EvalRunner.run(eval_sets, candidate)
-  复用 MVP-B eval-set test 流程
-  每条 query 执行后：
-    - 收集 kweaver trace（原始 span 仅本地存档）
+  EvalRunner.run(eval_sets, candidates/candidate-v{N}.yaml)
+  复用 MVP-B eval-set test 流程，每条 query 执行后：
+    - 收集 kweaver trace（原始 span 仅本地存档，不传 LLM）
     - 提取轨迹摘要：tool_call_sequence / retry_count / latency_ms / error_codes
   → per-query: {assertion_results, trajectory_summary, raw_trace_id}
       │
       ▼
 Scoring
   四层输入 → 三轴分数：
-
-  输入层：
     [轨迹摘要]  tool_call_sequence / retry_count / latency_ms   → Trajectory 轴
     [断言结果]  assertion_results (contains/regex/semantic…)    → Outcome 轴
-    [候选配置]  当前 candidate prompt / skill / BKN 快照        → Guardrail 轴检查
+    [候选配置]  candidate-v{N}.yaml 快照                        → Guardrail 轴检查
     [声明不变量] mission.md guardrails 字段                     → Guardrail hard gate
 
-  Guardrail hard gate 违反 → 本轮 Trial 不写入 lineage，
-    writeRound(n, {guardrail_failed: true, scores})，跳 Deciding（用户可修改 candidate 再 resume）
-  正常 → writeRound(n, {scores, per_query_results, trajectory_summaries})
+  Guardrail hard gate 违反
+    → updateLineage(N, {status: "guardrail_failed"})
+    → writeRound(n, {guardrail_failed: true, scores})
+    → 跳 Deciding（用户修改 candidate 或 next_change 后可 resume）
+  正常 → updateLineage(N, {status: "scored"})
+       → writeRound(n, {scores, per_query_results, trajectory_summaries})
       │
       ▼
 Triaging
   输入（四层）：
     - round_n: {scores, per_query_results, trajectory_summaries}
     - prev_rounds: [{scores, triage_conclusion}]（历史轮摘要，不含原始 trace）
-    - candidate_config: 当前 prompt / skill / BKN 快照
-    - cross_round_memory_ref: 上轮 Triage 返回的 memory token（首轮为空）
+    - candidate_config: candidate-v{N}.yaml 快照
+    - cross_round_memory_ref: 上轮 memory token（首轮为空）
 
   TriageClient.triage(上述四层)
   → {diagnoses, hints, verdict: continue | publish, new_memory_token}
   → writeRound(n, {triage_conclusion, cross_round_memory_ref: new_memory_token})
+
+  若 verdict == continue：
+    SynthesizerClient.generate({mission, candidate_config, round_n, prev_rounds, new_memory_token})
+    → next_change: {target, hypothesis, patch}
+    → writeSuggestedChange()  覆写 mission.md 的 next_change 字段（供用户 review）
       │
       ▼
 Deciding
   verdict == publish  → 跳 Publishing
   round == max_rounds → 跳 Publishing
-  否则：releaseLock()，打印 exp show 摘要，暂停等 exp resume
+  否则：releaseLock()，打印 exp show 摘要（含 next_change 建议），暂停等 exp resume
       │
-      │ exp resume
+      │ exp resume → acquireLock() → 回到 Generating 开始下一轮
       ▼
 Publishing
   BundleWriter.write(candidate_lineage, all_rounds)
@@ -240,13 +248,13 @@ Publishing
   releaseLock()，打印产物路径
 ```
 
-**abort 检测**：每个状态开始前 `isAborted()` 检查一次，若 abort.signal 存在则立即退出并写 `{type:"aborted"}` 事件。
+**abort 检测**：每个状态开始前 `isAborted()` 检查一次，若 abort.signal 存在则立即退出、释放锁，并写 `{type:"aborted"}` 事件。
 
 ### 分析与迭代的信息层汇总
 
 | 信息层 | 来源 | 用于 | 备注 |
 |--------|------|------|------|
-| **执行轨迹摘要** | EvalRunner 从 kweaver trace 提取 | Trajectory 轴打分 / Triage 诊断 | 原始 span 仅本地存档，不传 LLM |
+| **执行轨迹摘要** | EvalRunner 从 kweaver trace 提取 | Trajectory 轴打分 / Triage 诊断 | 原始 span 仅本地存档；MVP-C provider 仅 claude-code |
 | **断言结果** | eval-set assertion 本地计算 | Outcome 轴打分 / Triage 诊断 | 结构化，token 成本低 |
 | **候选配置快照** | candidate YAML（prompt / skill / BKN） | Synthesizer 生成 patch / Guardrail 检查 | 每轮写入 lineage |
 | **跨轮记忆 token** | 上轮 Triage 返回 new_memory_token | Synthesizer + Triage 跨轮上下文 | 避免重复探索同一方向 |
@@ -285,13 +293,18 @@ next_change:                            # Synthesizer 覆写此字段
 
 | 类型 | 触发场景 | 处理 |
 |------|---------|------|
-| 可重试 | 网络超时、远端 provider 临时失败 | 指数退避重试 3 次（1s/2s/4s）；超限后写 `step_failed(retryable:true)` 退出，**不释放锁**；`exp resume` 从该状态重入 |
-| 不可恢复 | schema 校验失败、Guardrail hard gate | 写 `step_failed(retryable:false)`，释放锁，打印原因；需用户修复后重新 `exp run` |
+| 可重试 | 网络超时、远端 provider 临时失败 | 指数退避重试 3 次（1s/2s/4s）；超限后写 `step_failed(retryable:true)`，**释放锁**退出；`exp resume` 重新获锁，从 `step_failed` 事件恢复，重入同一状态 |
+| 不可恢复 | schema 校验失败 | 写 `step_failed(retryable:false)`，释放锁，打印原因；需用户修复后 `exp resume` 重入 |
 | 用户中止 | `exp abort` | 写 abort.signal；Coordinator 步前检测 → 写 `aborted` 事件 → 释放锁退出 |
 
 ### `exp resume` 幂等性
 
-`replayState()` 重建状态时，若当前状态不是 Deciding（上次中途崩溃），从该状态重入；每个状态开始前检查 events.jsonl 是否已有该步骤的完成事件，避免重做。
+`replayState()` fold events.jsonl 得出当前状态：
+- 最后事件为 `state_transition` → 从该状态重入（含 Deciding 后恢复）
+- 最后事件为 `step_failed(retryable:true)` → 从 failed 所在状态重入（重试）
+- 最后事件为 `step_failed(retryable:false)` → 同上，重入后由用户确认修复
+
+每个状态开始前检查 events.jsonl 是否已有该步骤的完成事件，避免重做（幂等保证）。
 
 ### `exp doctor` 检查项
 
