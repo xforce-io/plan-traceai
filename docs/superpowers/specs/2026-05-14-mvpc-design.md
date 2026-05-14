@@ -171,11 +171,12 @@ exp doctor .        — 环境自检
 ## 4. 数据流：单轮迭代循环
 
 ```
-Init
-  acquireLock() → initDir() → replayState()
-  若 events.jsonl 已有记录 → 跳转到当前状态（resume 路径）
+Init（exp run 触发）
+  acquireLock() → replayState()
+  若 events.jsonl 存在且状态非终态（non Published/Aborted）→ 报错退出，提示用户用 exp resume
+  若终态或空 → initDir() → 清空 .trace-state/ → 重新开始
       │
-      ▼ round = last_round + 1
+      ▼ round = 1
 Generating
   SynthesizerClient.generate(mission, prev_round?)
   → next_change: {target, hypothesis, patch}
@@ -191,8 +192,9 @@ Executing
       ▼
 Scoring
   本地计算三轴分数（Outcome / Trajectory / Guardrail）
-  Guardrail hard gate 违反 → Trial 淘汰，跳 Deciding
-  → writeRound(n, {scores, per_query_results})
+  Guardrail hard gate 违反 → 本轮 Trial 不写入 lineage，
+    writeRound(n, {guardrail_failed: true, scores})，跳 Deciding（用户可修改 candidate 再 resume）
+  正常 → writeRound(n, {scores, per_query_results})
       │
       ▼
 Triaging
