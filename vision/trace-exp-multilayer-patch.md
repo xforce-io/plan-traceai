@@ -245,33 +245,82 @@ Synthesizer 根据 `failure_attribution` 中影响最大的层决定 `next_chang
 
 ---
 
-## §5 PatchApplier 扩展
+## §5 流程变化
+
+### 5.1 FSM 状态机不变
+
+状态转移路径（Triaging → Deciding → Generating → Executing → ...）保持不变。变化在两个状态的**内部逻辑**。
+
+### 5.2 Triaging 状态内部变化
+
+```
+现在：
+  TriageClient  → verdict + summary
+  Synthesizer   → next_change.target = agent.system_prompt（固定）
+
+之后：
+  TriageClient  → verdict + summary + failure_attribution（新增）
+  Synthesizer   → 读 failure_attribution → 动态决定 next_change.target
+```
+
+`failure_attribution` 按影响题数降序排列，Synthesizer 取第一条的 `suggested_target` 作为本轮 patch target。`agent.skills`（换绑）是例外——Synthesizer 不自动建议，需人工在 mission.md 中手动指定。
+
+### 5.3 Deciding 状态变化：`exp show` 展示层归因
+
+`exp show` 在 Deciding 状态需要额外展示 `failure_attribution`，让用户在 resume 前清楚当前建议打哪一层：
+
+```
+State: Deciding  Round: 1
+Failure attribution:
+  [kn]    Q36 — vehicle_sales 对象类型缺失       → kn.object_type
+  [skill] Q52, Q54 — query_object_instance 无排序  → skill.content
+  [agent] Q42 — 查询对象类型选择错误              → agent.system_prompt
+Suggested next change:
+  target: kn.object_type
+  hypothesis: ...
+```
+
+### 5.4 Generating 状态变化：外部 API 调用与错误处理
+
+现在 Generating 只写本地文件（candidate.yaml）。之后 `kn.*` / `skill.content` target 需要调外部 API，引入新的失败模式：
+
+| target | 外部调用 | 失败模式 | retryable |
+|--------|---------|---------|-----------|
+| `agent.*` | 无（写本地文件） | — | 是 |
+| `skill.content` | Skill 注册/发布 API | 网络超时、版本冲突 | 是 |
+| `kn.object_type` | KN API（写操作） | 部分写入后失败 | 需幂等检查 |
+
+KN patch 的 `step_failed` 需区分两种情况：
+- **未开始写入**：retryable=true，直接重试
+- **已部分写入**：retryable=false，需先执行 rollback.yaml 中的反向操作，再标记可重试
+
+---
+
+## §6 PatchApplier 扩展
 
 `PatchApplier` 是 Generating 状态下执行 `next_change` 的组件。扩展后需支持三条执行路径：
 
 ```
 PatchApplier.apply(next_change)
   ├── target == agent.*    → 现有逻辑（写 candidate.yaml，agent 字段）
-  ├── target == kn.*       → 调用 kweaver bkn / context-loader API
-  │     kn.object_type     →   创建 object_type + 绑定 dataview
-  │     kn.relation_type   →   创建 relation_type
-  └── target == skill.*    → 调用 kweaver skill register / update
-        skill.content      →   更新 SKILL.md 内容，发布新版本
+  ├── target == kn.*       → 调用 KN API
+  │     kn.object_type     →   dry-run 验证 → 创建 object_type + 绑定 dataview
+  │     kn.relation_type   →   dry-run 验证 → 创建 relation_type
+  └── target == skill.*    → 调用 Skill API
+        skill.content      →   更新内容 → 发布新版本 → 记录新 version ID
 ```
 
-每条路径执行后需写 `candidate-lineage.yaml` 追加版本记录，并可回滚（Rollback 接口）。
+每条路径执行后写 `candidate-lineage.yaml` 追加快照，KN patch 额外写 `rollback.yaml`。
 
-### KN patch 执行细节
+### KN patch 执行保护
 
-KN 写操作有副作用（影响生产知识网络），需额外保护：
-
-1. **沙箱优先**：若平台支持 KN 分支/快照，在快照上操作
-2. **`--dry-run` 验证**：写前用 `bkn validate` 校验 patch 合法性
-3. **回滚记录**：写 `rollback.yaml` 记录操作前的状态，支持 `exp abort` 时还原
+1. **dry-run 优先**：写前用 `bkn validate` 校验 patch 合法性
+2. **原子记录**：每个写操作前先写 rollback.yaml，写入后更新 kn_patch_log
+3. **未来兼容**：平台支持 KN 版本/快照后，替换为快照操作，rollback.yaml 可废弃
 
 ---
 
-## §6 验证计划
+## §7 验证计划
 
 使用 HuaTai 实验（`~/lab/ht/exp`）作为端到端验证场景：
 
@@ -285,7 +334,7 @@ KN 写操作有副作用（影响生产知识网络），需额外保护：
 
 ---
 
-## §7 范围与限制
+## §8 范围与限制
 
 **在范围内（本 spec）：**
 - `next_change` schema 扩展（三个 target 类型）
