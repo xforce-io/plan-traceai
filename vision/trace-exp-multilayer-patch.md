@@ -60,11 +60,18 @@ Triage 能诊断出 round 失败的症状，但所有建议都被迫挤进 `syst
 
 ```
 agent.system_prompt    现有，保持不变
-agent.skills           绑定 / 解绑 skill_id 列表
+agent.skills           显式换绑不同 skill（架构决策，需人工确认）
 kn.object_type         新增对象类型（绑定 dataview）
 kn.relation_type       新增关系类型
-skill.content          更新 skill SKILL.md / SOP 文档
+skill.content          迭代同一 skill 的内容（发布新版本）—— Skill 层常规 patch
 ```
+
+**Skill patch 的两种模式：**
+
+| 模式 | target | 场景 |
+|------|--------|------|
+| 迭代同一 skill | `skill.content` | 默认。内容改进，skill 身份不变，版本递增，diff 清晰可追溯 |
+| 换绑不同 skill | `agent.skills` | 当前 skill 策略根本方向错误，需整体替换。显式决策，Synthesizer 不自动建议 |
 
 ### 2.2 `candidate.yaml` schema 扩展
 
@@ -73,21 +80,45 @@ skill.content          更新 skill SKILL.md / SOP 文档
 agent:
   description: "..."
   system_prompt: "..."
-  skills: []
 
-# 新增（KN 层）
+# Skill 层：记录当前绑定的完整 skill set（id + 版本快照）
+agent:
+  skills:
+    - id: "xxxx-industry-sop"
+      version: "v2"
+    - id: "yyyy-query-sop"
+      version: "v1"
+
+# KN 层
 kn:
-  id: "d820qu7a2s1et30t7ckg"        # 必填，操作哪个知识网络
-  object_types: []                   # patch 追加的对象类型定义列表
-  relation_types: []                 # patch 追加的关系类型定义列表
-
-# 新增（Skill 层）
-skills:
-  - id: "xxxx"
-    content_patch: "..."             # 覆盖 SKILL.md 中的特定段落
+  id: "d820qu7a2s1et30t7ckg"
+  object_types: []       # patch 追加的对象类型列表（累积）
+  relation_types: []     # patch 追加的关系类型列表（累积）
 ```
 
-### 2.3 `next_change` 格式扩展
+### 2.3 `candidate-lineage.yaml` 扩展
+
+每轮快照三层完整状态，确保任意版本可复现：
+
+```yaml
+lineage:
+  - version: v3
+    agent_id: "01KRFZW5W17B1JKVC5JSV7D9M5"
+    skill_set:                          # 全量 skill 版本快照
+      - id: "xxxx-industry-sop"
+        version: "v2"
+      - id: "yyyy-query-sop"
+        version: "v2"                   # 本轮 skill.content patch 的结果
+    kn_patch_log:                       # BKN 现无版本机制，记录操作日志
+      - op: add_object_type
+        concept_name: "vehicle_sales"
+        dataview_id: "c2b94354c4fb4b9aba200d480aea8539"
+        applied_at: "2026-05-15T10:00:00Z"
+    # 未来 BKN 有版本后替换为：
+    # kn_version: "bkn-commit-abc123"
+```
+
+### 2.4 `next_change` 格式扩展
 
 ```yaml
 # KN 层 patch 示例（Q36 根因修复）
@@ -118,7 +149,7 @@ next_change:
         target_object_type: "vehicle_sales"
         join_key: "VEHICLEID → vehicle_id"
 
-# Skill 层 patch 示例（Q52/Q54 根因修复）
+# Skill 层 patch 示例（Q52/Q54 根因修复）—— 同一 skill 发新版
 next_change:
   target: skill.content
   hypothesis: >
@@ -126,16 +157,60 @@ next_change:
     在 SOP skill 中补充：取极值用 sort_by + limit=1；
     获取全量记录需循环 search_after 直到 total_count 耗尽。
   patch:
-    skill_id: "xxxx-component-price-sop"
+    skill_id: "xxxx-component-price-sop"   # 同一 skill，发布新版本
     append_section: |
       ## 查询完整性要求
       - 取最大/最小值：传 sort_by=[{"field":"UNITPRICEHIGH","order":"desc"}] + limit=1
       - 获取全量记录：检查 total_count，若 > limit 则用 search_after 循环翻页
+
+# 架构决策示例 —— 换绑不同 skill（需人工确认，Synthesizer 不自动建议）
+next_change:
+  target: agent.skills
+  patch:
+    unbind: ["yyyy-query-sop"]
+    bind:
+      - id: "zzzz-new-approach-sop"
+        version: "v1"
 ```
 
 ---
 
-## §3 Triage 输出扩展：失败层归因
+## §3 Provider 接口扩展
+
+`SynthesizerProvider` 和 `TriageProvider` 是抽象接口，具体实现可以是 claude-code、decision-agent 或其他。多层 patch target 是**接口契约层**的扩展，所有 provider 实现均需适配。
+
+```typescript
+// 现有接口
+interface TriageResult {
+  verdict: "continue" | "publish" | "abort";
+  summary: string;
+}
+
+// 扩展后
+interface TriageResult {
+  verdict: "continue" | "publish" | "abort";
+  summary: string;
+  failure_attribution: FailureAttribution[];   // 新增
+}
+
+interface FailureAttribution {
+  layer: "kn" | "skill" | "agent";
+  evidence: string;
+  affected_queries: string[];
+  suggested_target: PatchTarget;
+}
+
+// SynthesizerProvider 生成 next_change 时，基于 failure_attribution 决定 target
+interface SynthesizerResult {
+  target: PatchTarget;   // 不再默认 agent.system_prompt
+  hypothesis: string;
+  patch: KnPatch | SkillPatch | AgentPatch;
+}
+```
+
+---
+
+## §4 Triage 输出扩展：失败层归因
 
 Triage 当前输出只有症状描述（`semantic_match 失败`）。需要增加 `failure_layer` 字段：
 
@@ -170,7 +245,7 @@ Synthesizer 根据 `failure_attribution` 中影响最大的层决定 `next_chang
 
 ---
 
-## §4 PatchApplier 扩展
+## §5 PatchApplier 扩展
 
 `PatchApplier` 是 Generating 状态下执行 `next_change` 的组件。扩展后需支持三条执行路径：
 
@@ -196,7 +271,7 @@ KN 写操作有副作用（影响生产知识网络），需额外保护：
 
 ---
 
-## §5 验证计划
+## §6 验证计划
 
 使用 HuaTai 实验（`~/lab/ht/exp`）作为端到端验证场景：
 
@@ -210,7 +285,7 @@ KN 写操作有副作用（影响生产知识网络），需额外保护：
 
 ---
 
-## §6 范围与限制
+## §7 范围与限制
 
 **在范围内（本 spec）：**
 - `next_change` schema 扩展（三个 target 类型）
@@ -220,6 +295,7 @@ KN 写操作有副作用（影响生产知识网络），需额外保护：
 
 **不在范围内（post-MVP）：**
 - 多层 patch 在同一 round 内并行执行（当前一个 round 只打一个 target）
-- Skill 版本管理与自动回滚
-- KN 分支/快照支持（依赖平台能力）
+- Skill 自动回滚（当前记录 version ID，手动 rebind 旧版本）
+- KN 分支/快照支持（依赖平台 BKN 版本机制，设计预留字段 `kn_version`）
+- Synthesizer 自动决策 `agent.skills` 换绑（需人工确认）
 - Synthesizer 自动决策 patch target（MVP 阶段 Triage 输出归因，人工确认后 resume）
